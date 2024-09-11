@@ -80,7 +80,7 @@ class SocketServer:
     def listen_runners(self):
         while True:
             conn, addr = self.socket.accept()
-            self.runners.append({'socket': conn, 'active': True, 'status': RunnerStatus()})
+            self.runners.append({'socket': conn, 'status': RunnerStatus()})
             print(f"[NEW CONNECTION] {addr} connected.")
             threading.Thread(target=self.handle_runner, args=(len(self.runners)-1, conn)).start()
 
@@ -90,10 +90,9 @@ class SocketServer:
             message = pickle.loads(message)
             if message['type'] == "Status":
                 self.runners[idx]['status'].unpack(message['data'])
+                print(self.runners[idx]['status'].hostname, self.runners[idx]['status'].gpucnt, self.runners[idx]['status'].gpumem)
             else:
                 print(message)
-                self.runners[idx]['active'] = False
-                raise RuntimeError
 
         connected = True
         while connected:
@@ -105,8 +104,6 @@ class SocketServer:
                     connected = False
             except ConnectionResetError:
                 connected = False
-        print(f"[DISCONNECT] runner {idx} disconnected.")
-        self.runners[idx]['active'] = False
 
 class SocketRunner:
     def __init__(self, path):
@@ -124,7 +121,7 @@ class SocketRunner:
         self.threadreport = threading.Thread(target=self.send_report)
         self.threadreport.start()
     
-    def _send_to_server(self, data):
+    def send_to_server(self, data):
         with self.socket_wlock:
             self.socket.send(data)
 
@@ -136,12 +133,8 @@ class SocketRunner:
                 'type': "Status",
                 'data': status.pack()
             })
-            self._send_to_server(message)
+            self.send_to_server(message)
             time.sleep(1)
-    
-    def recv_server(self):
-        self.socket.recv(SOCKET_BUFFER_SIZE, timeout=)
-
 
 def runserv():
     serv = SocketServer("../../../runs")
@@ -155,4 +148,4 @@ def runrner():
     runner.threadreport.join()
 
 if __name__ == "__main__":
-    runserv()
+    runrner()
