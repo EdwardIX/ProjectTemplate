@@ -36,17 +36,31 @@ class ListParser:
         
         return out
 
+class BoolParser:
+    def __init__(self):
+        pass
+    
+    def __call(self, s):
+        if s == 'True' or s == 'true':
+            return True
+        elif s == 'False' or s == 'false':
+            return False
+        else:
+            raise ValueError(f"Unrecognized boolean type {s}")
+
 class ConfigParser:
     """
     ConfigParser: A class to parse config file and generate list of config base on cmdargs
     config: a config file (.py) defines a constant dict CONFIG, with the following keys:
         'config'  (required): the base config. ** CAN BE OVERWRITTEN BY CMDARGS **
-        'run'     (optional): the resources to run this program (dict with following keys)
+        'runreq'  (optional): the resources to run this program (dict with following keys)
             ** CAN BE OVERWRITTEN BY CMDARGS & SCAN, PRIORITY: SCAN > CMDARGS > DEFAULT**
+            seed: seed for task (default None)
             numgpu: number of parallel gpus (default 1)
             gpumem: minimum memory requirement for each gpu (default 0)
             gpuusg: minimum gpu usage required to run this program (default 0)
             repeat: number of repeat needed (default 1)
+            mulnode: allow multi node training (default False)
         'cmdargs' (optional): a dict with (name of cmdargs)-(linked param path in config)
             e.g.: '--batchsize': 'Training/Batchsize'
         'scan'    (optional): a dict with (param path in config)-(a list of values to be scaned)
@@ -64,12 +78,14 @@ class ConfigParser:
         
         self.params = {
             "config": config['config'],
-            "run": {
+            "runreq": {
+                'seed': "Random",
                 'numgpu': 1,
                 'gpumem': 0,
                 'gpuusg': 0,
                 'repeat': 1,
-                **config.get('run', {}), # Overwrite default settings
+                'mulnode': False,
+                **config.get('runreq', {}), # Overwrite default settings
             }
         }
         self.cmdargs = config.get('cmdargs', {})
@@ -91,7 +107,7 @@ class ConfigParser:
     
     def _modify_params(self, params, name, modify_value):
         if name.startswith(':'): # Modify Running Params
-            config = params['run']
+            config = params['runreq']
             config[name[1:]] = modify_value
         else:
             names = name.split('/')
@@ -106,18 +122,22 @@ class ConfigParser:
                     config[n] = modify_value
 
     def add_parser_args(self, parser):
+        # for runreq arguments
+        parser.add_argument('--seed', type=str, default=None)
         parser.add_argument('--numgpu', type=int, default=None)
         parser.add_argument('--gpumem', type=int, default=None)
         parser.add_argument('--gpuusg', type=int, default=None)
         parser.add_argument('--repeat', type=int, default=None)
+        parser.add_argument('--mulnode', type=BoolParser(), default=None)
 
+        # for cmdargs arguments
         for k, v in self.cmdargs.items():
             k = (k if k.startswith('--') else '--' + k)
             p = self._get_params(self.params, v)
             if isinstance(p, list):
                 parser.add_argument(k, type=ListParser(p), default=None)
             elif isinstance(p, bool):
-                parser.add_argument(k, type=str, default=None)
+                parser.add_argument(k, type=BoolParser(), default=None)
             else:
                 parser.add_argument(k, type=type(p), default=None)
 
@@ -125,17 +145,20 @@ class ConfigParser:
         if len(self.config_list):
             return self.config_list
     
+        # parse cmdarg arguments
         args = vars(args)
         for k, v in self.cmdargs.items():
             p = args.get(k.removeprefix('--'))
             if p is not None:
                 self._modify_params(self.params, v, p)
 
-        for k in self.params['run'].keys(): # Overwrite run setting by cmdargs
+        # parse runreq arguments
+        for k in self.params['runreq'].keys(): # Overwrite runreq setting by cmdargs
             p = args.get(k)
             if p is not None:
-                self.params['run'][k] = p
+                self.params['runreq'][k] = p
         
+        # Calculate config list
         self.config_list = []
         if self.scan is None:
             self.config_list.append(self.params)
