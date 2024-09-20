@@ -7,152 +7,195 @@ import pickle
 import json
 import subprocess as sp
 
-SOCKET_BUFFER_SIZE = 4096
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .server import Server
+    from .runner import Runner
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect(('10.255.255.255', 1))
     return s.getsockname()[0]
 
-def find_free_port():
-    # 创建一个临时套接字
-    temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # 将套接字绑定到本地主机的一个随机端口
-    temp_socket.bind(('localhost', 0))
-    # 获取绑定后的端口号
-    _, port = temp_socket.getsockname()
-    # 关闭套接字
-    temp_socket.close()
-    
-    return port
+def send_message(sock:socket.socket, message):
+    message_length = len(message)
+    message_length_bytes = message_length.to_bytes(4, byteorder='big')
+    try:
+        sock.sendall(message_length_bytes)
+        sock.sendall(message)
+        return True
+    except Exception as e:
+        print("[SEND MESSAGE ERROR]:", e)
+        return False
 
-class RunnerStatus:
-    def __init__(self):
-        self.hostname = ""
-        self.gpucnt = 0
-        self.gpumem = []
-        self.gpuusg = []
-
-    def update(self):
-        gpustat = json.loads(sp.check_output(['gpustat', '--json']).decode())
-        gpus = gpustat['gpus']
-        self.hostname = gpustat['hostname']
-        self.gpucnt = len(gpustat)
-        self.gpumem = list(map((lambda g:g['memory.total']-g['memory.used']), gpus))
-        self.gpuusg = list(map((lambda g:g['utilization.gpu']), gpus))
-
-    def pack(self):
-        package = (
-            self.hostname,
-            self.gpucnt,
-            self.gpumem,
-            self.gpuusg,
-        )
-        return pickle.dumps(package)
-    
-    def unpack(self, data):
-        (
-            self.hostname,
-            self.gpucnt,
-            self.gpumem,
-            self.gpuusg
-        ) = pickle.loads(data)
-
+def recv_message(sock:socket.socket):
+    try:
+        message_length_bytes = sock.recv(4)
+    except Exception as e:
+        print("[RECV MESSAGE ERROR]:", e)
+        return None
+    if not message_length_bytes:
+        return None
+    message_length = int.from_bytes(message_length_bytes, byteorder='big')
+    message = sock.recv(message_length)
+    return message
 
 class SocketServer:
-    def __init__(self, path):
+    def __init__(self, serv):
+        self.serv:Server = serv
+
+        # Initialize Basic Information
+        self.runners = {}
+        self.hostname = json.loads(sp.check_output(['gpustat', '--json']).decode())['hostname']
+
+        # Initialize listen socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.runners = []
-        
         self.socket.bind(("0.0.0.0", 0))
         ip = get_local_ip()
         port = self.socket.getsockname()[1]
-
         self.socket.listen()
         print(f"[LISTENING] Server is listening on {ip}:{port}")
-
-        with open(os.path.join(path, "connection.txt"), "w") as f:
+        # Save IP and Port to connection.txt
+        with open(os.path.join("runs", "connection.txt"), "w") as f:
             print(f"ip:{ip}\nport:{port}", file=f)
         
+        # Start Thread
+        self.socket_wlock = threading.Lock() # For Simplicity, All Runner Sockets shares the same wlock.
         self.listener = threading.Thread(target=self.listen_runners) # Create a thread to listen runners
         self.listener.start()
 
     def listen_runners(self):
+        """Thread: Handling New Incoming Runners"""
         while True:
+            # Build Connection
             conn, addr = self.socket.accept()
-            self.runners.append({'socket': conn, 'active': True, 'status': RunnerStatus()})
-            print(f"[NEW CONNECTION] {addr} connected.")
-            threading.Thread(target=self.handle_runner, args=(len(self.runners)-1, conn)).start()
+            send_message(conn, self.hostname.encode()) # Send Hostname
+            runner_name = recv_message(conn).decode() # Recv Hostname
+            if runner_name in self.runners.keys():
+                print(f"[REJECT CONNECTION] duplicated runners on {runner_name}")
+                conn.close()
+            
+            # Handle New Runner
+            self.runners[runner_name] = conn # Add to dict
+            self.serv.on_new_runner(runner_name) # Notify Server
+            print(f"[NEW CONNECTION] {runner_name} connected.")
+            threading.Thread(target=self.handle_runner, args=(runner_name, conn)).start() # Start Threading
 
-    def handle_runner(self, idx, conn):
-
+    def handle_runner(self, name, conn):
+        """Thread: Handle Active Runners"""
         def handle_message(message):
+            """Handle Message from Runner"""
             message = pickle.loads(message)
-            if message['type'] == "Status":
-                self.runners[idx]['status'].unpack(message['data'])
+            if message['type'] == "RunnerStatus":
+                self.serv.on_runner_status_update(name, message['data'])
+            elif message['type'] == "TaskStatus":
+                self.serv.on_task_status_update(message['identifier'], message['status'])
             else:
-                print(message)
-                self.runners[idx]['active'] = False
-                raise RuntimeError
+                raise RuntimeError(f"Not Recognized Message {message}")
 
+        # Main Loop
         connected = True
         while connected:
-            try:
-                message = conn.recv(SOCKET_BUFFER_SIZE)
-                if message:
-                    handle_message(message)
-                else:
-                    connected = False
-            except ConnectionResetError:
+            message = recv_message(conn)
+            if message:
+                handle_message(message)
+            else:
                 connected = False
-        print(f"[DISCONNECT] runner {idx} disconnected.")
-        self.runners[idx]['active'] = False
+        
+        self.serv.on_del_runner(name)
+        self.runners.pop(name)
+        print(f"[DISCONNECT] runner {name} disconnected.")
+    
+    # Sending Functions ...
+    def send_task(self, runner, identifier, task, gpuinfo, seed):
+        message = pickle.dumps({
+            'type': "RunTask",
+            'identifier': identifier,
+            'args': task.args, 
+            'reqs': task.reqs, 
+            'gpuinfo': gpuinfo,
+            'seed': seed,
+        })
+        with self.socket_wlock:
+            return send_message(self.runners[runner], message)
+    
+    def send_command(self, runner, command, args):
+        message = pickle.dumps({
+            'type': command,
+            **args,
+        })
+        with self.socket_wlock:
+            return send_message(self.runners[runner], message)
 
 class SocketRunner:
-    def __init__(self, path):
+    def __init__(self, runn):
+        self.runn:Runner = runn
+
+        # Initialize Basic Information
+        self.hostname = json.loads(sp.check_output(['gpustat', '--json']).decode())['hostname']
+
+        # Get IP and Port of Server
         ip, port = None, None
-        with open(os.path.join(path, "connection.txt"), "r") as f:
+        if not os.path.exists(os.path.join("runs", "connection.txt")):
+            print(f"waiting for server to start ...")
+            while not os.path.exists(os.path.join("runs", "connection.txt")):
+                time.sleep(1)
+        with open(os.path.join("runs", "connection.txt"), "r") as f:
             for l in f.readlines():
                 if l.startswith("ip:"): ip = l[3:].strip()
                 if l.startswith("port:"): port = int(l[5:].strip())
 
+        # Initialize communication socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((ip, port))
-        print(f"[CONNECTED] ip:{ip}, port:{port}")
-        self.socket_wlock = threading.Lock()
+        self.connected = True
+        send_message(self.socket, self.hostname.encode())
+        server_name = recv_message(self.socket).decode()
+        print(f"[CONNECTED] server_name:{server_name} ip:{ip}, port:{port}")
 
+        # Start Multi Thread
+        self.socket_wlock = threading.Lock()
         self.threadreport = threading.Thread(target=self.send_report)
         self.threadreport.start()
-    
-    def _send_to_server(self, data):
-        with self.socket_wlock:
-            self.socket.send(data)
+        self.threadlisten = threading.Thread(target=self.recv_server)
+        self.threadlisten.start()
 
-    def send_report(self):
-        status = RunnerStatus()
+    def recv_server(self):
+        """Thread: Listening Server Commands"""
         while True:
-            status.update()
+            message = recv_message(self.socket)
+            if not message:
+                self.connected = False
+                break
+            message = pickle.loads(message)
+            
+            if message['type'] == 'RunTask':
+                self.runn.on_run_task(message['identifier'], message['args'], message['reqs'], message['gpuinfo'], message['seed'])
+            elif message['type'] == 'StopTask':
+                self.runn.on_stop_task(message['identifier'])
+            else:
+                raise RuntimeError(f"Not Recognized Message {message}")
+
+    # Sending Functions ...
+    def send_report(self):
+        while self.connected:
+            self.runn.on_update_status()
             message = pickle.dumps({
-                'type': "Status",
-                'data': status.pack()
+                'type': "RunnerStatus",
+                'data': self.runn.status.pack()
             })
-            self._send_to_server(message)
+            with self.socket_wlock:
+                if not send_message(self.socket, message):
+                    self.connected = False
+                    break
             time.sleep(1)
     
-    def recv_server(self):
-        self.socket.recv(SOCKET_BUFFER_SIZE, timeout=)
-
-
-def runserv():
-    serv = SocketServer("../../../runs")
-    while True:
-        time.sleep(1)
-        if len(serv.runners):
-            print(serv.runners[0]['status'].hostname)
-
-def runrner():
-    runner = SocketRunner("../../../runs")
-    runner.threadreport.join()
-
-if __name__ == "__main__":
-    runserv()
+    def send_task_status(self, identifier, status):
+        message = pickle.dumps({
+            'type': "TaskStatus",
+            'identifier': identifier, 
+            'status': status,
+        })
+        with self.socket_wlock:
+            if not send_message(self.socket, message):
+                self.connected = False

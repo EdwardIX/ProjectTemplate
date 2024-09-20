@@ -303,7 +303,7 @@ class Logger:
     
     def summary(self, path):
         if len(self.history) == 0:
-            return []
+            return {}
 
         # 获取所有变量名并按名称排序
         variables = set()
@@ -327,22 +327,15 @@ class Logger:
         for var in variables:
             dropna_values = df[var].dropna()
             if not dropna_values.empty:
-                statistics[var] = {'Last Non-NaN Value': dropna_values.iloc[-1],
-                                   'Last 5 Non-NaN Mean': dropna_values.tail(5).mean(),
-                                   'Last 10 Non-NaN Mean': dropna_values.tail(10).mean(),
-                                   'All Non-NaN Mean': dropna_values.mean()}
+                statistics[var] = {'last': dropna_values.iloc[-1],
+                                   'last_5': dropna_values.tail(5).mean(),
+                                   'last_10': dropna_values.tail(10).mean(),
+                                   'all': dropna_values.mean()}
             else:
-                statistics[var] = {'Last Non-NaN Value': np.nan,
-                                   'Last 5 Non-NaN Mean': np.nan,
-                                   'Last 10 Non-NaN Mean': np.nan,
-                                   'All Non-NaN Mean': np.nan}
-
-       # 将统计信息放在一个列表中
-        statistics_rows = [{'step': stat_name, **{var: statistics[var][stat_name] for var in variables}} \
-                            for stat_name in statistics[list(statistics.keys())[0]].keys()]
-
-        # 添加统计信息到DataFrame末尾
-        df = pd.concat([df, pd.DataFrame(statistics_rows)], ignore_index=True)
+                statistics[var] = {'last': np.nan,
+                                   'last_5': np.nan,
+                                   'last_10': np.nan,
+                                   'all': np.nan}
 
         # 导出为逗号分隔符文件
         df.to_csv(path, index=False)

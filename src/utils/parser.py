@@ -25,14 +25,14 @@ class ListParser:
     
     def __call__(self, s):
         out = s.strip().split(',')
-        if len(ref) != len(out):
-            for i in range(1, len(ref)):
-                assert type(ref[i]) == type(ref[0]), f"Different type encountered in reference list"
-            T = type(ref[0])
+        if len(self.ref) != len(out):
+            for i in range(1, len(self.ref)):
+                assert type(self.ref[i]) == type(self.ref[0]), f"Different type encountered in reference list"
+            T = type(self.ref[0])
             out = list(map(T, out))
         else:
             for i in range(len(out)):
-                out[i] = type(ref[i])(out[i])
+                out[i] = type(self.ref[i])(out[i])
         
         return out
 
@@ -40,7 +40,7 @@ class BoolParser:
     def __init__(self):
         pass
     
-    def __call(self, s):
+    def __call__(self, s):
         if s == 'True' or s == 'true':
             return True
         elif s == 'False' or s == 'false':
@@ -52,8 +52,8 @@ class ConfigParser:
     """
     ConfigParser: A class to parse config file and generate list of config base on cmdargs
     config: a config file (.py) defines a constant dict CONFIG, with the following keys:
-        'config'  (required): the base config. ** CAN BE OVERWRITTEN BY CMDARGS **
-        'runreq'  (optional): the resources to run this program (dict with following keys)
+        'args'  (required): the base args. ** CAN BE OVERWRITTEN BY CMDARGS **
+        'reqs'  (optional): the resources to run this program (dict with following keys)
             ** CAN BE OVERWRITTEN BY CMDARGS & SCAN, PRIORITY: SCAN > CMDARGS > DEFAULT**
             seed: seed for task (default None)
             numgpu: number of parallel gpus (default 1)
@@ -61,9 +61,9 @@ class ConfigParser:
             gpuusg: minimum gpu usage required to run this program (default 0)
             repeat: number of repeat needed (default 1)
             mulnode: allow multi node training (default False)
-        'cmdargs' (optional): a dict with (name of cmdargs)-(linked param path in config)
+        'cmdargs' (optional): a dict with (name of cmdargs)-(linked param path in args)
             e.g.: '--batchsize': 'Training/Batchsize'
-        'scan'    (optional): a dict with (param path in config)-(a list of values to be scaned)
+        'scan'    (optional): a dict with (param path in args)-(a list of values to be scaned)
             all the combinations of the values will be enumerated 
             Note: the list can be replace by a dict to be scaned together
     """
@@ -73,19 +73,19 @@ class ConfigParser:
         
         assert isinstance(config, dict), f"Not supported config type: {type(config)}"
 
-        if 'config' not in config.keys():
-            raise ValueError('the provided config file does not contains config argument')
+        if 'args' not in config.keys():
+            raise ValueError('the provided config file does not contains args argument')
         
         self.params = {
-            "config": config['config'],
-            "runreq": {
+            "args": config['args'],
+            "reqs": {
                 'seed': "Random",
                 'numgpu': 1,
                 'gpumem': 0,
                 'gpuusg': 0,
                 'repeat': 1,
                 'mulnode': False,
-                **config.get('runreq', {}), # Overwrite default settings
+                **config.get('reqs', {}), # Overwrite default settings
             }
         }
         self.cmdargs = config.get('cmdargs', {})
@@ -95,31 +95,31 @@ class ConfigParser:
     
     def _get_params(self, params, name):
         names = name.split('/')
-        config = params['config']
+        args = params['args']
         for i, n in enumerate(names):
-            if isinstance(config, list):
+            if isinstance(args, list):
                 n = int(n)
 
             if i != len(names) - 1:
-                config = config[n]
+                args = args[n]
             else:
-                return config[n]
+                return args[n]
     
     def _modify_params(self, params, name, modify_value):
         if name.startswith(':'): # Modify Running Params
-            config = params['runreq']
-            config[name[1:]] = modify_value
+            reqs = params['reqs']
+            reqs[name[1:]] = modify_value
         else:
             names = name.split('/')
-            config = params['config']
+            args = params['args']
             for i, n in enumerate(names):
-                if isinstance(config, list):
+                if isinstance(args, list):
                     n = int(n)
 
                 if i != len(names) - 1:
-                    config = config[n]
+                    args = args[n]
                 else: 
-                    config[n] = modify_value
+                    args[n] = modify_value
 
     def add_parser_args(self, parser):
         # for runreq arguments
@@ -152,11 +152,11 @@ class ConfigParser:
             if p is not None:
                 self._modify_params(self.params, v, p)
 
-        # parse runreq arguments
-        for k in self.params['runreq'].keys(): # Overwrite runreq setting by cmdargs
+        # parse reqs arguments
+        for k in self.params['reqs'].keys(): # Overwrite reqs setting by cmdargs
             p = args.get(k)
             if p is not None:
-                self.params['runreq'][k] = p
+                self.params['reqs'][k] = p
         
         # Calculate config list
         self.config_list = []
