@@ -59,6 +59,7 @@ class ConfigParser:
             numgpu: number of parallel gpus (default 1)
             gpumem: minimum memory requirement for each gpu (default 0)
             gpuusg: minimum gpu usage required to run this program (default 0)
+            occupy: use GPUs that others are currently using (default False)
             repeat: number of repeat needed (default 1)
             mulnode: allow multi node training (default False)
         'cmdargs' (optional): a dict with (name of cmdargs)-(linked param path in args)
@@ -84,6 +85,7 @@ class ConfigParser:
                 'gpumem': 0,
                 'gpuusg': 0,
                 'repeat': 1,
+                'occupy': False,
                 'mulnode': False,
                 **config.get('reqs', {}), # Overwrite default settings
             }
@@ -128,6 +130,7 @@ class ConfigParser:
         parser.add_argument('--gpumem', type=int, default=None)
         parser.add_argument('--gpuusg', type=int, default=None)
         parser.add_argument('--repeat', type=int, default=None)
+        parser.add_argument('--occupy', type=BoolParser(), default=None)
         parser.add_argument('--mulnode', type=BoolParser(), default=None)
 
         # for cmdargs arguments

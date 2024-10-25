@@ -4,12 +4,14 @@ import re
 import sys
 import json
 import shutil
+import pickle
 import numpy as np
 import pandas as pd
 import collections
 from typing import List
 
 from .task import Task
+from .comm import SocketClient
 
 class Experiment:
     def __init__(self, config_list, exp_name="Test"):
@@ -17,18 +19,25 @@ class Experiment:
         Create a Group of Task
         exp_name: the name of this experiment
         """
-
+        self.config_list = config_list
         self.exp_name = exp_name
         self.run_time = time.strftime('%y.%m.%d-%H.%M.%S')
         self.identifier = self.exp_name + "::" + self.run_time
         self.tasks:List[Task] = [] # List of tasks
         self.status = {}           # Task Running Status
 
+    def send_to_server(self):
+        client = SocketClient("Experiment")
+        client.send_message(pickle.dumps(self))
+        client.close()
+        print("Experiment Sent to Server")
+
+    def prepare(self):
         rootpath = os.path.join("runs", self.exp_name, self.run_time)
         os.makedirs(rootpath)
         shutil.copytree("src", os.path.join(rootpath, "src"))
         
-        for config in config_list:
+        for config in self.config_list:
             self.tasks.append(Task(config['args'], config['reqs']))
         
         if os.path.exists(os.path.join("runs", self.exp_name, "tasks.json")):

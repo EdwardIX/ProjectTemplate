@@ -17,6 +17,20 @@ def get_local_ip():
     s.connect(('10.255.255.255', 1))
     return s.getsockname()[0]
 
+def get_serv_ip():
+    # Get IP and Port of Server
+    ip, port = None, None
+    if not os.path.exists(os.path.join("runs", "connection.txt")):
+        print(f"waiting for server to start ...")
+        while not os.path.exists(os.path.join("runs", "connection.txt")):
+            time.sleep(1)
+    with open(os.path.join("runs", "connection.txt"), "r") as f:
+        for l in f.readlines():
+            if l.startswith("ip:"): ip = l[3:].strip()
+            if l.startswith("port:"): port = int(l[5:].strip())
+    
+    return ip, port
+
 def send_message(sock:socket.socket, message):
     message_length = len(message)
     message_length_bytes = message_length.to_bytes(4, byteorder='big')
@@ -61,33 +75,43 @@ class SocketServer:
         
         # Start Thread
         self.socket_wlock = threading.Lock() # For Simplicity, All Runner Sockets shares the same wlock.
-        self.listener = threading.Thread(target=self.listen_runners) # Create a thread to listen runners
+        self.listener = threading.Thread(target=self.listen) # Create a thread to listen runners
         self.listener.start()
 
-    def listen_runners(self):
-        """Thread: Handling New Incoming Runners"""
+    def listen(self):
+        """Thread: Handling New Incoming Runners and Commands"""
         while True:
             # Build Connection
             conn, addr = self.socket.accept()
             send_message(conn, self.hostname.encode()) # Send Hostname
-            runner_name = recv_message(conn).decode() # Recv Hostname
-            if runner_name in self.runners.keys():
-                print(f"[REJECT CONNECTION] duplicated runners on {runner_name}")
-                conn.close()
-            
-            # Handle New Runner
-            self.runners[runner_name] = conn # Add to dict
-            self.serv.on_new_runner(runner_name) # Notify Server
-            print(f"[NEW CONNECTION] {runner_name} connected.")
-            threading.Thread(target=self.handle_runner, args=(runner_name, conn)).start() # Start Threading
+            conn_type = recv_message(conn).decode()
+            if conn_type == "Runner":
+                threading.Thread(target=self.handle_runner, args=(conn,)).start() # Start Threading
+            elif conn_type == "Experiment":
+                self.serv.add_experiment(pickle.loads(recv_message(conn)))
+            else:
+                print(f"[REJECT CONNECTION] Unknown Connection Type: {conn_type}")
 
-    def handle_runner(self, name, conn):
+    def handle_runner(self, conn):
         """Thread: Handle Active Runners"""
+        
+        # Init Runner Message
+        runner_name = recv_message(conn).decode() # Recv Hostname
+        if runner_name in self.runners.keys():
+            print(f"[REJECT CONNECTION] duplicated runners on {runner_name}")
+            conn.close()
+            return
+        
+        # Handle New Runner
+        self.runners[runner_name] = conn # Add to dict
+        self.serv.on_new_runner(runner_name) # Notify Server
+        print(f"[NEW CONNECTION] {runner_name} connected.")
+
         def handle_message(message):
             """Handle Message from Runner"""
             message = pickle.loads(message)
             if message['type'] == "RunnerStatus":
-                self.serv.on_runner_status_update(name, message['data'])
+                self.serv.on_runner_status_update(runner_name, message['data'])
             elif message['type'] == "TaskStatus":
                 self.serv.on_task_status_update(message['identifier'], message['status'])
             else:
@@ -102,9 +126,9 @@ class SocketServer:
             else:
                 connected = False
         
-        self.serv.on_del_runner(name)
-        self.runners.pop(name)
-        print(f"[DISCONNECT] runner {name} disconnected.")
+        self.serv.on_del_runner(runner_name)
+        self.runners.pop(runner_name)
+        print(f"[DISCONNECT] runner {runner_name} disconnected.")
     
     # Sending Functions ...
     def send_task(self, runner, identifier, task, gpuinfo, seed):
@@ -134,21 +158,13 @@ class SocketRunner:
         # Initialize Basic Information
         self.hostname = json.loads(sp.check_output(['gpustat', '--json']).decode())['hostname']
 
-        # Get IP and Port of Server
-        ip, port = None, None
-        if not os.path.exists(os.path.join("runs", "connection.txt")):
-            print(f"waiting for server to start ...")
-            while not os.path.exists(os.path.join("runs", "connection.txt")):
-                time.sleep(1)
-        with open(os.path.join("runs", "connection.txt"), "r") as f:
-            for l in f.readlines():
-                if l.startswith("ip:"): ip = l[3:].strip()
-                if l.startswith("port:"): port = int(l[5:].strip())
+        ip, port = get_serv_ip()
 
         # Initialize communication socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((ip, port))
         self.connected = True
+        send_message(self.socket, "Runner".encode())
         send_message(self.socket, self.hostname.encode())
         server_name = recv_message(self.socket).decode()
         print(f"[CONNECTED] server_name:{server_name} ip:{ip}, port:{port}")
@@ -160,6 +176,7 @@ class SocketRunner:
         self.threadlisten = threading.Thread(target=self.recv_server)
         self.threadlisten.start()
 
+    # Recving Functions ...
     def recv_server(self):
         """Thread: Listening Server Commands"""
         while True:
@@ -199,3 +216,24 @@ class SocketRunner:
         with self.socket_wlock:
             if not send_message(self.socket, message):
                 self.connected = False
+
+class SocketClient:
+    def __init__(self, conn_type):
+        ip, port = get_serv_ip()
+
+        # Initialize communication socket
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((ip, port))
+        self.connected = True
+        send_message(self.socket, conn_type.encode())
+        server_name = recv_message(self.socket).decode()
+        print(f"[CONNECTED] server_name:{server_name} ip:{ip}, port:{port}")
+    
+    def send_message(self, message):
+        return send_message(self.socket, message)
+    
+    def recv_message(self):
+        return recv_message(self.socket)
+
+    def close(self):
+        self.socket.close()

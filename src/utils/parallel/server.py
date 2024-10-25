@@ -33,6 +33,7 @@ class Server:
     
     def add_experiment(self, e:Experiment):
         self.exps[e.identifier] = e
+        e.prepare()
 
     def get_task(self, status):
         print(status)

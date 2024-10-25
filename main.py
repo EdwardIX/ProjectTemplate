@@ -1,8 +1,6 @@
-import os
-import copy
 import argparse
 
-from src.utils.parallel import Server, Experiment, Runner
+from src.utils.parallel import Experiment
 from src.utils.parser import ConfigParser
 
 if __name__ == "__main__":
@@ -20,5 +18,4 @@ if __name__ == "__main__":
         print(config)
 
     exp = Experiment(config_parser.config_list)
-    serv = Server()
-    serv.add_experiment(exp)
+    exp.send_to_server()

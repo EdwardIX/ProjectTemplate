@@ -55,7 +55,7 @@ class Task:
         def get_avail_gpus(s): # Return all available gpus on single node, Ranked as Priority
             gpu_prio_list = []
             for i in range(len(s.gpumem)):
-                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg']:
+                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg'] and (s.gpupro[i] - s.gpumypro[i] == 0 or self.reqs['occupy']):
                     gpu_prio_list.append((s.gpupro[i], s.gpuusg[i], i))
             gpu_prio_list.sort()
             return [g[-1] for g in gpu_prio_list]
@@ -225,6 +225,7 @@ def subprocess(args, worldinfo, path, taskid, repeatid, seed):
                 json.dump({
                     "Success": True if exception is None and signum is None else False,
                     "Exception": f"Signal {signum} received" if signum is not None else (f"{type(exception)}:{exception}" if exception is not None else None),
+                    "End Time": time.strftime('%y.%m.%d-%H.%M.%S'),
                     "Wall Time": time.time() - start_time["Wall"],
                     "User Time": time.process_time() - start_time["User"],
                     "Peak Memory Usage": mem_peak,
