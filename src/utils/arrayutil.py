@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import functools
+from einops import rearrange, reduce, repeat
 
 def cache_array(func):
     """

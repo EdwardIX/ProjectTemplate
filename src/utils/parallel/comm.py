@@ -13,12 +13,13 @@ if TYPE_CHECKING:
     from .runner import Runner
 
 def get_local_ip():
+    # Allocate local ip
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect(('10.255.255.255', 1))
     return s.getsockname()[0]
 
 def get_serv_ip():
-    # Get IP and Port of Server
+    # Get IP and Port of Server (from runs/connection.txt)
     ip, port = None, None
     if not os.path.exists(os.path.join("runs", "connection.txt")):
         print(f"waiting for server to start ...")
@@ -32,6 +33,7 @@ def get_serv_ip():
     return ip, port
 
 def send_message(sock:socket.socket, message):
+    # Send a Message with Length Prefix
     message_length = len(message)
     message_length_bytes = message_length.to_bytes(4, byteorder='big')
     try:
@@ -43,6 +45,7 @@ def send_message(sock:socket.socket, message):
         return False
 
 def recv_message(sock:socket.socket):
+    # Recv a Message with Length Prefix
     try:
         message_length_bytes = sock.recv(4)
     except Exception as e:
@@ -55,6 +58,14 @@ def recv_message(sock:socket.socket):
     return message
 
 class SocketServer:
+    """
+    A Socket for Server Commnunication:
+    Important Methods:
+        - listen: Listening Incoming Runners and Commands
+        - handle_runner (Thread): Handling New Incoming Runners
+        - send_task: send a task to runner
+        - send_command: send a command to runner
+    """
     def __init__(self, serv):
         self.serv:Server = serv
 
@@ -69,6 +80,7 @@ class SocketServer:
         port = self.socket.getsockname()[1]
         self.socket.listen()
         print(f"[LISTENING] Server is listening on {ip}:{port}")
+
         # Save IP and Port to connection.txt
         with open(os.path.join("runs", "connection.txt"), "w") as f:
             print(f"ip:{ip}\nport:{port}", file=f)
@@ -151,23 +163,45 @@ class SocketServer:
         with self.socket_wlock:
             return send_message(self.runners[runner], message)
 
-class SocketRunner:
-    def __init__(self, runn):
-        self.runn:Runner = runn
-
-        # Initialize Basic Information
-        self.hostname = json.loads(sp.check_output(['gpustat', '--json']).decode())['hostname']
-
+class SocketClient:
+    """
+    A temporary raw Client to communicate with server
+    """
+    def __init__(self, conn_type):
         ip, port = get_serv_ip()
 
         # Initialize communication socket
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((ip, port))
         self.connected = True
-        send_message(self.socket, "Runner".encode())
-        send_message(self.socket, self.hostname.encode())
+        send_message(self.socket, conn_type.encode())
         server_name = recv_message(self.socket).decode()
         print(f"[CONNECTED] server_name:{server_name} ip:{ip}, port:{port}")
+    
+    def send_message(self, message):
+        return send_message(self.socket, message)
+    
+    def recv_message(self):
+        return recv_message(self.socket)
+
+    def close(self):
+        self.socket.close()
+
+class SocketRunner(SocketClient):
+    """
+    A Socket for Runner to communicate with Server
+    Important Methods:
+        - recv_server (Thread): Listening Server Commands
+        - send_report (Thread): Sending Runner Status Repeatly
+        - send_task_status: Update Task Running Status to server
+    """
+    def __init__(self, runn):
+        super().__init__(self, "Runner")
+
+        # Initialize Basic Information
+        self.runn:Runner = runn
+        self.hostname = json.loads(sp.check_output(['gpustat', '--json']).decode())['hostname']
+        self.send_message(self.hostname.encode())
 
         # Start Multi Thread
         self.socket_wlock = threading.Lock()
@@ -180,7 +214,7 @@ class SocketRunner:
     def recv_server(self):
         """Thread: Listening Server Commands"""
         while True:
-            message = recv_message(self.socket)
+            message = self.recv_message()
             if not message:
                 self.connected = False
                 break
@@ -202,7 +236,7 @@ class SocketRunner:
                 'data': self.runn.status.pack()
             })
             with self.socket_wlock:
-                if not send_message(self.socket, message):
+                if not self.send_message(message):
                     self.connected = False
                     break
             time.sleep(1)
@@ -214,26 +248,30 @@ class SocketRunner:
             'status': status,
         })
         with self.socket_wlock:
-            if not send_message(self.socket, message):
+            if not self.send_message(message):
                 self.connected = False
 
-class SocketClient:
-    def __init__(self, conn_type):
-        ip, port = get_serv_ip()
+class SocketWeb(SocketClient):
+    def __init__(self):
+        super().__init__(self, "Web")
 
-        # Initialize communication socket
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((ip, port))
-        self.connected = True
-        send_message(self.socket, conn_type.encode())
-        server_name = recv_message(self.socket).decode()
-        print(f"[CONNECTED] server_name:{server_name} ip:{ip}, port:{port}")
+    def get_task_list(self): # Return an identifier list of All Active Task
+        pass
     
-    def send_message(self, message):
-        return send_message(self.socket, message)
-    
-    def recv_message(self):
-        return recv_message(self.socket)
+    def get_experiment_list(self): # Return an identifier list of All Experiments
+        pass
 
-    def close(self):
-        self.socket.close()
+    def get_task_status(self, identifier): # Get All info of a specific Task
+        pass
+
+    def get_experiment_status(self, identifier): # Get All info of a specific Experiment
+        pass
+
+    def get_runner_status(self, identifier): # Get All Runners and their status
+        pass
+
+    def cmd_stop_task(self, identifier): # Stop a specific Task
+        pass
+
+    def cmd_stop_experiment(self, identifier): # Stop a specific Experiment
+        pass
