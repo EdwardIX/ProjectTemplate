@@ -11,7 +11,7 @@ from .status import RunnerStatus
 
 class Runner:
     def __init__(self):
-        self.status = RunnerStatus("localhost")
+        self.status = RunnerStatus()
         self.socket = SocketRunner(self)
 
         self.pool:Dict[str, Task] = {}
@@ -37,25 +37,48 @@ class Runner:
                  taskid = i, \
                  repeatid = j, \
                  seed = seed)
+        try:
+            for gid in gpuinfo[self.socket.hostname]:
+                self.status.start_task(gid, task.reqs)
+        except Exception as e:
+            print(gpuinfo[self.socket.hostname], task.gpuids)
+            print(e)
 
     def on_stop_task(self, identifier):
         if identifier in self.pool.keys(): # The Task is still active
             self.pool[identifier].terminate()
+    
+    def on_stop_all_task(self):
+        with self.pool_lock:
+            for n, t in self.pool.items():
+                t.terminate()
+
+    def on_task_finished(self, identifier):
+        task = self.pool[identifier]
+        exp_name, run_time, i, j = re.match(r"(.*)::([\d\.]{8}-[\d\.]{8}):(\d+)-(\d+)", identifier).groups()
+        i, j = int(i), int(j)
+        with open(os.path.join("runs", exp_name, run_time, f"{i}-{j}", "summary.json"), "r") as f:
+            success = json.load(f)['Success']
+        self.socket.send_task_status(identifier, "Success" if success else "Failed")
+        for gid in task.gpuids:
+            self.status.end_task(gid, task.reqs)
 
     def run(self):
-        while self.socket.connected:
-            inactive_tasks = []
-            for n, t in self.pool.items():
-                if not t.alive():
-                    exp_name, run_time, i, j = re.match(r"(.*)::([\d\.]{8}-[\d\.]{8}):(\d+)-(\d+)", n).groups()
-                    i, j = int(i), int(j)
-                    with open(os.path.join("runs", exp_name, run_time, f"{i}-{j}", "summary.json"), "r") as f:
-                        success = json.load(f)['Success']
-                    self.socket.send_task_status(n, "Success" if success else "Failed")
-                    inactive_tasks.append(n)
-            
-            with self.pool_lock:
-                for n in inactive_tasks:
-                    self.pool.pop(n)
+        try:
+            while self.socket.connected:
+                inactive_tasks = []
+                for n, t in self.pool.items():
+                    if not t.alive():
+                        inactive_tasks.append(n)
+                        self.on_task_finished(n)
+                
+                with self.pool_lock:
+                    for n in inactive_tasks:
+                        self.pool.pop(n)
 
-            time.sleep(10)
+                time.sleep(10)
+        
+        except Exception as e:
+            print(e)
+        finally:
+            self.on_stop_all_task()

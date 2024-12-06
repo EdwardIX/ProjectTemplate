@@ -49,13 +49,18 @@ class Task:
         self.args = args
         self.reqs = reqs
 
+        # Runtime Information
         self.progress = None
+        self.gpuids = None
     
     def runnable(self, status):
         def get_avail_gpus(s): # Return all available gpus on single node, Ranked as Priority
             gpu_prio_list = []
             for i in range(len(s.gpumem)):
-                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg'] and (s.gpupro[i] - s.gpumypro[i] == 0 or self.reqs['occupy']):
+                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg'] and s.gpupro[i] < self.reqs['gpupro'] \
+                   and s.gpumem[i] + s.gpumymem[i] - s.taskmem[i] >= self.reqs['gpumem'] \
+                   and s.gpupro[i] - s.gpumypro[i] + s.taskpro[i] < self.reqs['gpupro'] \
+                   and (s.gpupro[i] - s.gpumypro[i] == 0 or self.reqs['occupy']):
                     gpu_prio_list.append((s.gpupro[i], s.gpuusg[i], i))
             gpu_prio_list.sort()
             return [g[-1] for g in gpu_prio_list]
@@ -158,23 +163,29 @@ class Task:
                                 cwd = os.getcwd(),
                                 env = {**os.environ, **current_env})
 
-    def run(self, nnodes, node_rank, gpu_ids, path, taskid, repeatid, seed):
+    def run(self, nnodes, node_rank, gpuids, path, taskid, repeatid, seed):
+        self.gpuids = gpuids
         os.makedirs(path, exist_ok=True)
         if nnodes > 1:
-            self.run_torchrun_multinode(nnodes, node_rank, gpu_ids, path, taskid, repeatid, seed)
-        elif len(gpu_ids) > 1:
-            self.run_torchrun_singlenode(gpu_ids, path, taskid, repeatid, seed)
+            self.run_torchrun_multinode(nnodes, node_rank, gpuids, path, taskid, repeatid, seed)
+        elif len(gpuids) > 1:
+            self.run_torchrun_singlenode(gpuids, path, taskid, repeatid, seed)
         else:
-            self.run_python(gpu_ids[0], path, taskid, repeatid, seed)
+            self.run_python(gpuids[0], path, taskid, repeatid, seed)
     
     def alive(self):
         return (self.process.poll() == None)
 
     def terminate(self):
         self.process.terminate()
+        self.process=None
+        self.gpuids=None
 
     def join(self):
-        return self.process.wait()
+        retcode = self.process.wait()
+        self.process=None
+        self.gpuids=None
+        return retcode
 
 def subprocess(args, worldinfo, path, taskid, repeatid, seed):
     """This method will be the target of subprocess and started as a new process."""
@@ -202,17 +213,7 @@ def subprocess(args, worldinfo, path, taskid, repeatid, seed):
         sys.stderr = HookedOutput(os.path.join(path, "err.txt"), sys.stderr)
         logger.initialize(path, taskid, repeatid)
 
-    # 4: Load, Setup stat (the target is in target.py target)
-    spec = importlib.util.spec_from_file_location("target", os.path.join(os.path.dirname(path), "src", "target.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    func = module.target
-    args = pickle.loads(args)
-    exception = None
-    start_time = {"Wall": time.time(), "User": time.process_time()}
-    tracemalloc.start()
-
-    # 5: Set up Signal Handle function & Summary function
+    # 4: Set up Signal Handle function & Summary function
     def summary(signum, *args):
         if worldinfo['rank'] == 0:
             if signum is not None: print(f"Signal {signum} received!")
@@ -232,9 +233,20 @@ def subprocess(args, worldinfo, path, taskid, repeatid, seed):
                     "Top 10 Memory Used": list(map(str, mem_snapshot.statistics('lineno')[:10])),
                     "Scalars Statistics": statistics,
                 }, f, indent=4)
+        exit(0)
 
     signal.signal(signal.SIGTERM, summary)
     signal.signal(signal.SIGINT, summary)
+
+    # 5: Load, Setup stat (the target is in target.py target)
+    spec = importlib.util.spec_from_file_location("target", os.path.join(os.path.dirname(path), "src", "target.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = module.target
+    args = pickle.loads(args)
+    exception = None
+    start_time = {"Wall": time.time(), "User": time.process_time()}
+    tracemalloc.start()
 
     # 6: Run
     try:

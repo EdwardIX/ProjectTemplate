@@ -98,9 +98,11 @@ class SocketServer:
             send_message(conn, self.hostname.encode()) # Send Hostname
             conn_type = recv_message(conn).decode()
             if conn_type == "Runner":
-                threading.Thread(target=self.handle_runner, args=(conn,)).start() # Start Threading
+                threading.Thread(target=self.handle_runner, args=(conn,)).start() # Start Threading for runner
             elif conn_type == "Experiment":
                 self.serv.add_experiment(pickle.loads(recv_message(conn)))
+            elif conn_type == "Web":
+                threading.Thread(target=self.handle_web, args=(conn,)).start() # Start Threading for Web
             else:
                 print(f"[REJECT CONNECTION] Unknown Connection Type: {conn_type}")
 
@@ -119,22 +121,19 @@ class SocketServer:
         self.serv.on_new_runner(runner_name) # Notify Server
         print(f"[NEW CONNECTION] {runner_name} connected.")
 
-        def handle_message(message):
-            """Handle Message from Runner"""
-            message = pickle.loads(message)
-            if message['type'] == "RunnerStatus":
-                self.serv.on_runner_status_update(runner_name, message['data'])
-            elif message['type'] == "TaskStatus":
-                self.serv.on_task_status_update(message['identifier'], message['status'])
-            else:
-                raise RuntimeError(f"Not Recognized Message {message}")
-
         # Main Loop
         connected = True
         while connected:
             message = recv_message(conn)
             if message:
-                handle_message(message)
+                """Handle Message from Runner"""
+                message = pickle.loads(message)
+                if message['type'] == "RunnerStatus":
+                    self.serv.on_runner_status_update(runner_name, message['data'])
+                elif message['type'] == "TaskStatus":
+                    self.serv.on_task_status_update(message['identifier'], message['status'])
+                else:
+                    raise RuntimeError(f"Not Recognized Message {message}")
             else:
                 connected = False
         
@@ -142,6 +141,33 @@ class SocketServer:
         self.runners.pop(runner_name)
         print(f"[DISCONNECT] runner {runner_name} disconnected.")
     
+    def handle_web(self, conn):
+        """Thread: Handle Web"""
+        connected = True
+        while connected:
+            message = recv_message(conn)
+            if message:
+                """Handle Message from Web"""
+                message = pickle.loads(message)
+                if message['type'] == "GetTaskList":
+                    send_message(conn, pickle.dumps(self.serv.get_task_list()))
+                elif message['type'] == "GetExperimentList":
+                    send_message(conn, pickle.dumps(self.serv.get_experiment_list()))
+                elif message['type'] == "GetTaskStatus":
+                    send_message(conn, pickle.dumps(self.serv.get_task_status(message['identifier'])))
+                elif message['type'] == "GetExperimentStatus":
+                    send_message(conn, pickle.dumps(self.serv.get_experiment_status(message['identifier'])))
+                elif message['type'] == "GetRunnerStatus":
+                    send_message(conn, pickle.dumps(self.serv.get_runner_status()))
+                elif message['type'] == "CmdStopTask":
+                    self.serv.stop_task(message['identifier'])
+                    send_message(conn, pickle.dumps({"Success": True, "Message": "Command Sent"}))
+                elif message['type'] == "CmdStopExperiment":
+                    self.serv.stop_experiment(message['identifier'])
+                    send_message(conn, pickle.dumps({"Success": True, "Message": "Command Sent"}))
+            else:
+                connected = False
+
     # Sending Functions ...
     def send_task(self, runner, identifier, task, gpuinfo, seed):
         message = pickle.dumps({
@@ -196,7 +222,7 @@ class SocketRunner(SocketClient):
         - send_task_status: Update Task Running Status to server
     """
     def __init__(self, runn):
-        super().__init__(self, "Runner")
+        super().__init__("Runner")
 
         # Initialize Basic Information
         self.runn:Runner = runn
@@ -253,25 +279,58 @@ class SocketRunner(SocketClient):
 
 class SocketWeb(SocketClient):
     def __init__(self):
-        super().__init__(self, "Web")
+        super().__init__("Web")
 
     def get_task_list(self): # Return an identifier list of All Active Task
-        pass
+        self.send_message(pickle.dumps({
+           "type": "GetTaskList",
+        }))
+        return pickle.loads(self.recv_message())
     
     def get_experiment_list(self): # Return an identifier list of All Experiments
-        pass
+        self.send_message(pickle.dumps({
+            "type": "GetExperimentList",  
+        }))
+        return pickle.loads(self.recv_message())
 
     def get_task_status(self, identifier): # Get All info of a specific Task
-        pass
+        self.send_message(pickle.dumps({
+            "type": "GetTaskStatus",
+            "identifier": identifier,
+        }))
+        return pickle.loads(self.recv_message())
 
     def get_experiment_status(self, identifier): # Get All info of a specific Experiment
-        pass
+        self.send_message(pickle.dumps({
+            "type": "GetExperimentStatus",
+            "identifier": identifier,
+        }))
+        return pickle.loads(self.recv_message())
 
-    def get_runner_status(self, identifier): # Get All Runners and their status
-        pass
+    def get_runner_status(self): # Get All Runners and their status
+        self.send_message(pickle.dumps({
+            "type": "GetRunnerStatus",
+        }))
+        return pickle.loads(self.recv_message())
 
     def cmd_stop_task(self, identifier): # Stop a specific Task
-        pass
+        success = self.send_message(pickle.dumps({
+            "type": "CmdStopTask",
+            "identifier": identifier,
+        }))
+        if success:
+            ret = pickle.loads(self.recv_message())
+            return ret["Success"], ret["Message"]
+        else:
+            return False, "Failed To Send Command"
 
     def cmd_stop_experiment(self, identifier): # Stop a specific Experiment
-        pass
+        success = self.send_message(pickle.dumps({
+            "type": "CmdStopExperiment",
+            "identifier": identifier,
+        }))
+        if success:
+            ret = pickle.loads(self.recv_message())
+            return ret["Success"], ret["Message"]
+        else:
+            return False, "Failed To Send Command"

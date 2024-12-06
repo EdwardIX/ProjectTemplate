@@ -1,0 +1,1 @@
+streamlit run src/utils/parallel/web.py

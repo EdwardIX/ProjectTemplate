@@ -14,14 +14,14 @@ from .task import Task
 from .comm import SocketClient
 
 class Experiment:
-    def __init__(self, config_list, exp_name="Test"):
+    def __init__(self, config_list, exp_name="Test", tasklist=None, ):
         """
         Create a Group of Task
         exp_name: the name of this experiment
         """
         self.config_list = config_list
         self.exp_name = exp_name
-        self.run_time = time.strftime('%y.%m.%d-%H.%M.%S')
+        self.run_time = "Null"
         self.identifier = self.exp_name + "::" + self.run_time
         self.tasks:List[Task] = [] # List of tasks
         self.status = {}           # Task Running Status
@@ -33,9 +33,12 @@ class Experiment:
         print("Experiment Sent to Server")
 
     def prepare(self):
+        self.run_time = time.strftime('%y.%m.%d-%H.%M.%S')
+        self.identifier = self.exp_name + "::" + self.run_time
+
         rootpath = os.path.join("runs", self.exp_name, self.run_time)
         os.makedirs(rootpath)
-        shutil.copytree("src", os.path.join(rootpath, "src"))
+        shutil.copytree("src", os.path.join(rootpath, "src"), ignore=shutil.ignore_patterns("*.pyc", "__pycache__"))
         
         for config in self.config_list:
             self.tasks.append(Task(config['args'], config['reqs']))
@@ -79,6 +82,16 @@ class Experiment:
         if (i, j) not in self.status.keys():
             return "Waiting"
         return self.status[(i, j)]
+
+    def get_all_task_status(self):
+        ret = {}
+        max_repeat = max([t.reqs['repeat'] for t in self.tasks])
+        for j in range(max_repeat):
+            for i, t in enumerate(self.tasks):
+                if t.reqs["repeat"] >= j:
+                    ret[(i, j)] = self.get_task_status(i, j)
+        
+        return ret
 
     def set_task_status(self, i, j, s):
         assert s in ("Waiting", "Running", "Success", "Failed"), f"Unknown task status {s}"
