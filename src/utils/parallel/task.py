@@ -10,6 +10,7 @@ import tracemalloc
 import json
 import signal
 import socket
+import random
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -27,6 +28,17 @@ def find_free_port():
     temp_socket.close()
     
     return port
+
+def parse_seed(seed, i, j):
+    random.seed(int(time.time()) ^ os.getpid())
+    if seed == "Random":
+        return random.randint(0, 2**32-1)
+    elif isinstance(seed, int):
+        return seed
+    elif isinstance(seed, str):
+        return int(eval(seed)) # Support simple expressions
+    else:
+        raise NotImplementedError
 
 class HookedOutput():
     def __init__(self, filename, original) -> None:
@@ -53,6 +65,9 @@ class Task:
         self.progress = None
         self.gpuids = None
     
+    def copy(self):
+        return Task(self.args, self.reqs)
+
     def runnable(self, status):
         def get_avail_gpus(s): # Return all available gpus on single node, Ranked as Priority
             gpu_prio_list = []

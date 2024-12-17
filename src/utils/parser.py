@@ -1,12 +1,21 @@
 import os
 import copy
 import itertools
+import json
+import yaml
 from importlib.util import spec_from_file_location, module_from_spec
 
-def load_config_from_py(filepath):
+def load_config_from_file(filepath):
     # 确保文件存在
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"No such file: '{filepath}'")
+
+    if filepath.endswith(".yaml"):
+        with open(filepath, 'r') as f:
+            return yaml.safe_load(f)
+    elif filepath.endswith(".json"):
+        with open(filepath, 'r') as f:
+            return json.load(f)
 
     # 动态加载模块
     spec = spec_from_file_location("module.name", filepath)
@@ -71,7 +80,16 @@ class ConfigParser:
     """
     def __init__(self, config):
         if isinstance(config, str):
-            config = load_config_from_py(os.path.join('config', config if config.endswith('.py') else config + '.py'))
+            suffix_list = ["", ".yaml", ".json", ".py"] # Try to load config file with different suffix
+
+            for suffix in suffix_list:
+                config_path = os.path.join("config", config + suffix)
+                if os.path.isfile(config_path):
+                    break
+            else:
+                raise FileNotFoundError(f"No such file: '{config}'")
+            
+            config = load_config_from_file(config_path)
         
         assert isinstance(config, dict), f"Not supported config type: {type(config)}"
 
@@ -85,7 +103,7 @@ class ConfigParser:
                 'numgpu': 1,
                 'gpumem': 0,
                 'gpuusg': 0,
-                'goupro': 1,
+                'gpupro': 1,
                 'repeat': 1,
                 'occupy': False,
                 'mulnode': False,

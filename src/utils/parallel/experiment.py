@@ -10,16 +10,18 @@ import pandas as pd
 import collections
 from typing import List
 
-from .task import Task
+from .task import Task, parse_seed
 from .comm import SocketClient
+from .status import RunnerStatus
 
 class Experiment:
-    def __init__(self, config_list, exp_name="Test", tasklist=None, ):
+    def __init__(self, config_list, exp_name="Test", run_list="All"):
         """
         Create a Group of Task
         exp_name: the name of this experiment
         """
         self.config_list = config_list
+        self.run_list = run_list
         self.exp_name = exp_name
         self.run_time = "Null"
         self.identifier = self.exp_name + "::" + self.run_time
@@ -38,7 +40,7 @@ class Experiment:
 
         rootpath = os.path.join("runs", self.exp_name, self.run_time)
         os.makedirs(rootpath)
-        shutil.copytree("src", os.path.join(rootpath, "src"), ignore=shutil.ignore_patterns("*.pyc", "__pycache__"))
+        shutil.copytree("src", os.path.join(rootpath, "src"), ignore=shutil.ignore_patterns("*.pyc", "__pycache__")) # Code Backup
         
         for config in self.config_list:
             self.tasks.append(Task(config['args'], config['reqs']))
@@ -47,8 +49,9 @@ class Experiment:
             self.load_task()
         else:
             self.save_task()
+        self.calc_run_list()
         self.save_runinfo()
-    
+
     def load_task(self):
         with open(os.path.join("runs", self.exp_name, "tasks.json"), "r") as f:
             task_config = json.load(f)["TaskArgs"]
@@ -72,14 +75,44 @@ class Experiment:
         with open(os.path.join("runs", self.exp_name, self.run_time, "runinfo.json"), "w") as f:
             json.dump({
                 "Command": "python " + " ".join(sys.argv[1:]),
+                "RunList": self.run_list,
                 "TaskReqs": [t.reqs for t in self.tasks],
             }, f, indent=2)
+
+    def calc_run_list(self):
+        if isinstance(self.run_list, str):
+            if self.run_list == "All":
+                self.run_list = [(i, j) for i, t in enumerate(self.tasks) for j in range(t.reqs["repeat"])]
+            elif self.run_list == "Failed": # Find all failed tasks in the previous run
+                prev_dir = max(
+                    (d for d in os.listdir("runs", self.exp_name) if re.match(r'\d{2}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}', d)),
+                    key=lambda d: time.strptime(d, '%y.%m.%d-%H.%M.%S'),
+                    default=None
+                )
+                if prev_dir is not None:
+                    with open(os.path.join("runs", self.exp_name, prev_dir, "runinfo.json"), "r") as f:
+                        self.run_list = json.load(f)["RunList"]
+                    
+                    def is_failed(i, j):
+                        path = os.path.join("runs", self.exp_name, prev_dir, f"{i}-{j}", f"summary.json")
+                        if not os.path.exists(path): return True
+                        with open(path) as f: return not json.load(f)["success"]
+                    
+                    self.run_list = list(filter(self.run_list, is_failed))
+                else:
+                    self.run_list = [(i, j) for i, t in enumerate(self.tasks) for j in range(t.reqs["repeat"])]
+            else:
+                raise ValueError(f"Unknown RunList Type: {self.run_list}")
+        elif not isinstance(self.run_list, list):
+            raise ValueError(f"Unknown RunList Type: {type(self.run_list)}")
 
     def add_task(self, config):
         self.tasks.append(Task(config['args'], config['reqs']))
 
     def get_task_status(self, i, j):
-        if (i, j) not in self.status.keys():
+        if (i, j) not in self.run_list:
+            return "Skipped"
+        elif (i, j) not in self.status.keys():
             return "Waiting"
         return self.status[(i, j)]
 
@@ -94,7 +127,7 @@ class Experiment:
         return ret
 
     def set_task_status(self, i, j, s):
-        assert s in ("Waiting", "Running", "Success", "Failed"), f"Unknown task status {s}"
+        assert s in ("Waiting", "Running", "Success", "Failed", "Skipped"), f"Unknown task status {s}"
         self.status[(i, j)] = s
     
     def log_task_runinfo(self, i, j, gpuinfo, seed):
@@ -123,6 +156,36 @@ class Experiment:
                 if t.reqs["repeat"] > j and self.get_task_status(i, j) not in ("Success", "Failed"):
                     return False
         return True
+
+    def run_local(self):
+        status = RunnerStatus()
+
+        self.prepare()
+        while not self.finished():
+            status.update()
+            taskid, gpuinfo = self.next_task({'local': status})
+            if taskid is not None:
+                i, j = taskid
+                path = os.path.join("runs", self.exp_name, self.run_time, f"{i}-{j}")
+                task = self.tasks[i].copy()
+
+                # Run Task
+                task.run(1, 0, gpuinfo['local'], path, i, j, parse_seed(task.reqs['seed'], i, j))
+                print(f"\033[32m############  Experiment {self.identifier} Task {i}-{j} Start On {gpuinfo} ############\033[0m")
+                task.join()
+
+                # Update Result
+                try:
+                    with open(os.path.join(path, "summary.json"), "r") as f:
+                        success = json.load(f)['Success']
+                except:
+                    success = False
+                self.set_task_status(i, j, "Success" if success else "Failed")
+                
+            else: # Experiment Not Finished, but waiting for gpu to run
+                time.sleep(10)
+        
+        self.summary()
 
     def summary(self, process_func=None):
         # Delete all __pycache__

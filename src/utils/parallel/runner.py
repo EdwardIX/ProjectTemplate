@@ -57,8 +57,11 @@ class Runner:
         task = self.pool[identifier]
         exp_name, run_time, i, j = re.match(r"(.*)::([\d\.]{8}-[\d\.]{8}):(\d+)-(\d+)", identifier).groups()
         i, j = int(i), int(j)
-        with open(os.path.join("runs", exp_name, run_time, f"{i}-{j}", "summary.json"), "r") as f:
-            success = json.load(f)['Success']
+        try:
+            with open(os.path.join("runs", exp_name, run_time, f"{i}-{j}", "summary.json"), "r") as f:
+                success = json.load(f)['Success']
+        except:
+            success = False
         self.socket.send_task_status(identifier, "Success" if success else "Failed")
         for gid in task.gpuids:
             self.status.end_task(gid, task.reqs)

@@ -8,17 +8,7 @@ from typing import Dict, List
 from .experiment import Experiment
 from .comm import SocketServer
 from .status import RunnerStatus
-
-random.seed(int(time.time()) ^ os.getpid())
-def parse_seed(seed, i, j):
-    if seed == "Random":
-        return random.randint(0, 2**32-1)
-    elif isinstance(seed, int):
-        return seed
-    elif isinstance(seed, str):
-        return int(eval(seed)) # Support simple expressions
-    else:
-        raise NotImplementedError
+from .task import parse_seed
 
 class Server:
     def __init__(self):

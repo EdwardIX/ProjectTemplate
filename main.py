@@ -18,4 +18,5 @@ if __name__ == "__main__":
         print(config)
 
     exp = Experiment(config_parser.config_list)
-    exp.send_to_server()
+    # exp.send_to_server()
+    exp.run_local()
