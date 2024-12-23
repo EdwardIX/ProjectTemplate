@@ -1,7 +1,7 @@
 CONFIG = {
     "args": {
         "aaa": 1,
-        "bbb": 2,
+        "bbb": "${:gpuusg}",
         "ccc": '1',
     },
     "reqs": {
@@ -14,8 +14,7 @@ CONFIG = {
     "scan": {
         'aaa': [1,2],
         'bbb': {
-            'bbb':[1,2,3],
             'ccc':[1,2,3],
-        }
+        },
     }
 }

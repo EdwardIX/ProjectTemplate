@@ -72,9 +72,9 @@ class Task:
         def get_avail_gpus(s): # Return all available gpus on single node, Ranked as Priority
             gpu_prio_list = []
             for i in range(len(s.gpumem)):
-                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg'] and s.gpupro[i] < self.reqs['gpupro'] \
+                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg'] \
                    and s.gpumem[i] + s.gpumymem[i] - s.taskmem[i] >= self.reqs['gpumem'] \
-                   and s.gpupro[i] - s.gpumypro[i] + s.taskpro[i] < self.reqs['gpupro'] \
+                   and s.taskpro[i] < self.reqs['gpupro'] \
                    and (s.gpupro[i] - s.gpumypro[i] == 0 or self.reqs['occupy']):
                     gpu_prio_list.append((s.gpupro[i], s.gpuusg[i], i))
             gpu_prio_list.sort()
@@ -120,7 +120,8 @@ class Task:
                                  '--path', path,
                                  '--taskid', str(taskid),
                                  '--repeatid', str(repeatid),
-                                 '--seed', str(seed)],
+                                 '--seed', str(seed),
+                                 '--debug', str(self.reqs['debug'])],
                                 cwd=os.getcwd(),
                                 env = {**os.environ, **current_env})
 
@@ -155,7 +156,8 @@ class Task:
                                  '--path', path,
                                  '--taskid', str(taskid),
                                  '--repeatid', str(repeatid),
-                                 '--seed', str(seed)],
+                                 '--seed', str(seed),
+                                 '--debug', str(self.reqs['debug'])],
                                 cwd = os.getcwd(),
                                 env = {**os.environ, **current_env})
 
@@ -174,7 +176,8 @@ class Task:
                                  '--path', path,
                                  '--taskid', str(taskid),
                                  '--repeatid', str(repeatid),
-                                 '--seed', str(seed)],
+                                 '--seed', str(seed),
+                                 '--debug', str(self.reqs['debug'])],
                                 cwd = os.getcwd(),
                                 env = {**os.environ, **current_env})
 
@@ -202,42 +205,43 @@ class Task:
         self.gpuids=None
         return retcode
 
-def subprocess(args, worldinfo, path, taskid, repeatid, seed):
+def subprocess(args, info):
     """This method will be the target of subprocess and started as a new process."""
     # 1: Set Gpu run environment:
     import torch
-    torch.cuda.set_device(worldinfo['device'])
+    torch.cuda.set_device(info['device'])
     torch.set_default_dtype(torch.float32)
 
     # 2: Set Random Seed
     import numpy as np
-    if seed is not None:
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        np.random.seed(seed)
+    if info['seed'] is not None:
+        torch.manual_seed(info['seed'])
+        torch.cuda.manual_seed(info['seed'])
+        np.random.seed(info['seed'])
 
     # 3: setup logging: Hook Stdout & Stderr + setup logger (only for local main process)
     import os
     import sys
-    sys.path.append(os.path.join(os.path.dirname(path), "src")) # Source code is in rundir/../src
-    from utils.logger import logger
-    if worldinfo['rank'] == 0:
+    def get_parent_dir(path, n): return os.path.dirname(get_parent_dir(path, n-1)) if n else path
+    sys.path.append(get_parent_dir(info['path'], (4 if info['debug'] else 1))) # Source code is in rundir/../src, set the root to src
+    from src.utils.logger import logger
+    if info['rank'] == 0:
         import os
         import sys
-        sys.stdout = HookedOutput(os.path.join(path, "log.txt"), sys.stdout)
-        sys.stderr = HookedOutput(os.path.join(path, "err.txt"), sys.stderr)
-        logger.initialize(path, taskid, repeatid)
+        sys.stdout = HookedOutput(os.path.join(info['path'], "log.txt"), sys.stdout)
+        sys.stderr = HookedOutput(os.path.join(info['path'], "err.txt"), sys.stderr)
+        logger.initialize(info['path'], info['taskid'], info['repeatid'])
 
     # 4: Set up Signal Handle function & Summary function
     def summary(signum, *args):
-        if worldinfo['rank'] == 0:
+        if info['rank'] == 0:
             if signum is not None: print(f"Signal {signum} received!")
             _, mem_peak = tracemalloc.get_traced_memory()
             mem_snapshot = tracemalloc.take_snapshot()
             tracemalloc.stop()
-            statistics = logger.summary(path = os.path.join(path, "stat.csv"))
+            statistics = logger.summary(path = os.path.join(info['path'], "stat.csv"))
             print(statistics)
-            with open(os.path.join(path, "summary.json"), "w") as f:
+            with open(os.path.join(info['path'], "summary.json"), "w") as f:
                 json.dump({
                     "Success": True if exception is None and signum is None else False,
                     "Exception": f"Signal {signum} received" if signum is not None else (f"{type(exception)}:{exception}" if exception is not None else None),
@@ -253,8 +257,8 @@ def subprocess(args, worldinfo, path, taskid, repeatid, seed):
     signal.signal(signal.SIGTERM, summary)
     signal.signal(signal.SIGINT, summary)
 
-    # 5: Load, Setup stat (the target is in target.py target)
-    spec = importlib.util.spec_from_file_location("target", os.path.join(os.path.dirname(path), "src", "target.py"))
+    # 5: Load, Setup stat (the target is in main.py:target)
+    spec = importlib.util.spec_from_file_location("target", os.path.join(get_parent_dir(info['path'], 4), "main.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     func = module.target
@@ -265,7 +269,7 @@ def subprocess(args, worldinfo, path, taskid, repeatid, seed):
 
     # 6: Run
     try:
-        func(config=args, worldinfo=worldinfo, path=path, taskid=taskid, repeatid=repeatid, seed=seed)
+        func(cfg=args, info=info)
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         exception = e
@@ -284,28 +288,34 @@ if __name__ == "__main__":
     parser.add_argument('--taskid', type=int)
     parser.add_argument('--repeatid', type=int)
     parser.add_argument('--seed', type=int)
+    parser.add_argument('--debug', type=str)
     args = parser.parse_args()
 
     if args.mode == 'python':
-        worldinfo = {
+        info = {
+            'path': args.path,
+            'taskid': args.taskid,
+            'repeatid': args.repeatid,
+            'seed': args.seed,
             'device': "cuda:" + os.environ['CUDA_VISIBLE_DEVICE'],
             'localrank': 0,
             'localworldsize': 1, 
             'rank': 0,
             'worldsize': 1,
+            'debug': args.debug == 'True',
         }
     elif args.mode in ('torchrun_singlenode', 'torchrun_multinode'):
-        worldinfo = {
+        info = {
+            'path': args.path,
+            'taskid': args.taskid,
+            'repeatid': args.repeatid,
+            'seed': args.seed,
             'device': "cuda:" + os.environ['CUDA_VISIBLE_DEVICE'].split(',')[int(os.environ['LOCAL_RANK'])],
             'localrank': int(os.environ['LOCAL_RANK']),
             'localworldsize': int(os.environ['LOCAL_WORLD_SIZE']),
             'rank': int(os.environ['RANK']),
             'worldsize': int(os.environ['WORLD_SIZE']),
+            'debug': args.debug == 'True',
         }
 
-    subprocess(base64.b64decode(args.args), \
-               worldinfo, \
-               args.path, \
-               args.taskid, \
-               args.repeatid, \
-               args.seed)
+    subprocess(base64.b64decode(args.args), info)
