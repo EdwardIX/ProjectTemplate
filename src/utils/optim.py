@@ -52,14 +52,14 @@ def get_scheduler(name):
     else:
         raise NotImplementedError
 
-def parse_scheduler(config, optimizer):
+def parse_scheduler(config, optimizer, steps_per_epoch=None):
     if config is None: return None
     assert config.interval in ["epoch", "step"]
     if config.name == "SequentialLR":
         return lr_scheduler.SequentialLR(
                 optimizer,
                 [
-                    parse_scheduler(conf, optimizer)
+                    parse_scheduler(conf, optimizer, steps_per_epoch)
                     for conf in config.schedulers
                 ],
                 milestones=config.args['milestones'],
@@ -67,9 +67,11 @@ def parse_scheduler(config, optimizer):
     elif config.name == "ChainedScheduler":
         return lr_scheduler.ChainedScheduler(
                 [
-                    parse_scheduler(conf, optimizer)
+                    parse_scheduler(conf, optimizer, steps_per_epoch)
                     for conf in config.schedulers
                 ]
             )
     else:
+        if config.name == "OneCycleLR":
+            return lr_scheduler.OneCycleLR(optimizer, **config.args, steps_per_epoch=steps_per_epoch)
         return get_scheduler(config.name)(optimizer, **config.args)

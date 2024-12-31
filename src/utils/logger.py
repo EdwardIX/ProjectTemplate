@@ -7,13 +7,14 @@ import logging
 import inspect
 import traceback
 import pandas as pd
+import matplotlib.pyplot as plt
 from collections import defaultdict
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from .plot import plot_heatmap, plot_lines
+from .plot import plot_heatmap, plot_lines, plot_hist
 
 def colored(text, color):
     # ANSI color codes for text
@@ -110,13 +111,9 @@ def _recursive_debug(data, indent=0, max_display=10, super_is_dict=False):
 # Tensorboard：自动定制输出信息，保存信息
 class Logger:
     def __init__(self):
-        self.taskstr = None
         self.writer = None
         self.logger = None
-        self.logdir = None
-        self.timers = {}
-        self.history = defaultdict(dict)
-        self.logged_messages = set()
+        self.status = None
         self.log_images = True
     
     def initialize(self, log_dir, taskid, repeatid):
@@ -125,6 +122,9 @@ class Logger:
         self.logger = logging.getLogger()
         self.logger.setLevel(logging.INFO)
         self.logdir = log_dir
+        self.timers = {}
+        self.history = defaultdict(dict)
+        self.logged_messages = set()
 
         formatter = ColoredFormatter('%(message)s')
         # formatter = ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -134,6 +134,9 @@ class Logger:
         ch.setFormatter(formatter)
         self.logger.addHandler(ch)
 
+    def set_status(self, status):
+        self.status = status
+
     def _get_caller_info(self):
         # 获取调用者的帧对象
         caller_frame = inspect.stack()[2]
@@ -141,6 +144,9 @@ class Logger:
         caller_function = caller_frame[3]
         caller_line = caller_frame[2]
         return f"{caller_file}:{caller_line}"
+
+    def _get_default_global_step(self):
+        return getattr(self.status, 'global_step', None)
 
     def info(self, *messages, once=False):
         if self.logger:
@@ -169,7 +175,7 @@ class Logger:
             for line in traceback.format_stack()[:-1]:
                 print(line.strip(), file=sys.stderr)
             self.logger.error(f"[{caller_info}] {message}")
-            exit(1)
+            raise AssertionError(f"[{caller_info}] {message}")
     
     def debug(self, *items, once=False):
         if self.logger:
@@ -185,13 +191,17 @@ class Logger:
     def add_scalars(self, scalars, global_step=None, group=None, verbose=True):
         if not self.writer:
             return
+        if global_step is None: 
+            global_step = self._get_default_global_step()
         for name, value in scalars.items():
             try:
                 if value is None:
                     value = np.nan
+                if isinstance(value, torch.Tensor):
+                    value = value.detach().cpu().numpy()
                 scalars[name] = float(value)
-            except Exception:
-                self.error("Cannot Convert scalar to float: recheck values in logger.add_scalars")
+            except Exception as e:
+                self.error(f"Cannot Convert scalar to float: check values in logger.add_scalars. Msg: {e}")
             
             if group is not None:
                 name = f"{group}/{name}"
@@ -233,46 +243,48 @@ class Logger:
         savepath = os.path.join(self.logdir, 'figures')
         if group is not None:
             savepath = os.path.join(savepath, group)
-        if not os.path.exists(savepath):
-            os.makedirs(savepath)
+        if global_step is None: 
+            global_step = self._get_default_global_step()
+
+        os.makedirs(savepath, exist_ok=True)
         savepath = os.path.join(savepath, f"{figtype}-{name.replace('/', '-')}-step{0 if global_step is None else global_step}.pkl")
-        
         with open(savepath, 'wb') as f:
             pickle.dump(data, f)
 
     def add_image(self, name, image, global_step=None, dataformats='CHW'):
+        if global_step is None: 
+            global_step = self._get_default_global_step()
         if self.writer and self.log_images:
             self.writer.add_image(name, image, global_step=global_step, dataformats=dataformats)
     
+    def add_plt_image(self, name, fig:plt.Figure, global_step=None, group=None):
+        if self.writer and self.log_images:
+            fig.canvas.draw()
+            img = np.array(fig.canvas.renderer.buffer_rgba())
+            if group is not None:
+                name = f"{group}/{name}"
+            self.writer.add_image(name, img, global_step=global_step, dataformats="HWC")
+
     def add_heatmap(self, name, x, y, z, global_step=None, group=None, **kwargs):
         if self.writer and self.log_images:
             data = to_numpy(x), to_numpy(y), to_numpy(z)
-            fig = plot_heatmap(*data, **kwargs)
-            fig.canvas.draw()
-            img = np.array(fig.canvas.renderer.buffer_rgba())
             self.save_figure_data('heatmap', name, data, global_step, group)
-            if group is not None:
-                name = f"{group}/{name}"
-            self.add_image(name, img, global_step, dataformats='HWC')
+            fig = plot_heatmap(*data, **kwargs)
+            self.add_plt_image(name, fig, global_step, group)
             
-    
     def add_lines(self, name, x, y, global_step=None, group=None, **kwargs):
         if self.writer and self.log_images:
             data = to_numpy(x), to_numpy(y)
-            fig = plot_lines(*data, **kwargs)
-            fig.canvas.draw()
-            img = np.array(fig.canvas.renderer.buffer_rgba())
             self.save_figure_data('lines', name, data, global_step, group)
-            if group is not None:
-                name = f"{group}/{name}"
-            self.add_image(name, img, global_step, dataformats='HWC')
-
-    # def add_line(self, name, value, index=None):
-    #     if self.writer:
-    #         if index is None:
-    #             index = np.arange(len(value))
-    #         for i in range(len(index)):
-    #             self.writer.add_scalar(name, value[i], index[i])
+            fig = plot_lines(*data, **kwargs)
+            self.add_plt_image(name, fig, global_step, group)
+    
+    def add_hist(self, name, x, bins=50, global_step=None, group=None, **kwargs):
+        if self.writer and self.log_images:
+            data = to_numpy(x), to_numpy(bins)
+            self.save_figure_data('hist', name, data, global_step, group)
+            fig = plot_hist(*data, **kwargs)
+            self.add_plt_image(name, fig, global_step, group)
     
     def timer_start(self, name="default", reset=True, verbose=False):
         self.timers[name] = (0 if reset else self.timers.get(name, 0)) - time.time()

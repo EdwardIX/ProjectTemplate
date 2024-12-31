@@ -53,6 +53,35 @@ def plot_lines(x, y, path=None, title='', xlabel='x', ylabel='y'):
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    ret = None
+    if path:
+        plt.savefig(path)
+    else: 
+        ret = plt.gcf()
+    plt.close()
+    return ret
+
+def plot_hist(x, bins=50, path=None, xlabel='Value', ylabel='Freq', title=""):
+    """
+    Plot a histogram of the values in a PyTorch array.
+    
+    Parameters:
+        array (np.array): The input array whose values are to be visualized.
+        bins (int): Number of bins for the histogram (default is 50).
+        title (str): Title of the histogram plot.
+    """
+    # Flatten the array to 1D
+    x = x.flatten()
+    
+    # Plot the histogram
+    plt.figure(figsize=(8, 6))
+    plt.hist(x, bins=bins, range=(x.min(), x.max()), color='blue', alpha=0.7, edgecolor='black')
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.7)
     
     ret = None
     if path:

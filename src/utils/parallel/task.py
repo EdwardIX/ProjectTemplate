@@ -219,7 +219,7 @@ def subprocess(args, info):
         torch.cuda.manual_seed(info['seed'])
         np.random.seed(info['seed'])
 
-    # 3: setup logging: Hook Stdout & Stderr + setup logger (only for local main process)
+    # 3: setup logging: Hook Stdout & Stderr + setup logger + write task info(only for local main process)
     import os
     import sys
     def get_parent_dir(path, n): return os.path.dirname(get_parent_dir(path, n-1)) if n else path
@@ -232,15 +232,18 @@ def subprocess(args, info):
         sys.stderr = HookedOutput(os.path.join(info['path'], "err.txt"), sys.stderr)
         logger.initialize(info['path'], info['taskid'], info['repeatid'])
 
+        with open(os.path.join(info['path'], 'task.json'), 'w') as f:
+            json.dump(info, f, indent=4)
+
     # 4: Set up Signal Handle function & Summary function
+    ppid = os.getppid()
     def summary(signum, *args):
-        if info['rank'] == 0:
+        if info['rank'] == 0 and os.getppid() == ppid: # Ensures only the main process enters this function
             if signum is not None: print(f"Signal {signum} received!")
             _, mem_peak = tracemalloc.get_traced_memory()
             mem_snapshot = tracemalloc.take_snapshot()
             tracemalloc.stop()
             statistics = logger.summary(path = os.path.join(info['path'], "stat.csv"))
-            print(statistics)
             with open(os.path.join(info['path'], "summary.json"), "w") as f:
                 json.dump({
                     "Success": True if exception is None and signum is None else False,

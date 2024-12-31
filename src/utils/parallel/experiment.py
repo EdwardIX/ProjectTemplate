@@ -15,15 +15,19 @@ from .comm import SocketClient
 from .status import RunnerStatus
 
 class Experiment:
-    def __init__(self, config_list, exp_name="Test", run_list="All"):
+    def __init__(self, config_list, exp_name="Test", run_list="All", use_prev_config=False):
         """
         Create a Group of Task
+        config_list: the list of config for each task
         exp_name: the name of this experiment
+        run_list: the list of tasks to be run
+        use_prev_config: for the same exp_name, keep using the same config
         """
         self.config_list = config_list
         self.run_list = run_list
         self.exp_name = exp_name
         self.run_time = "Null"
+        self.use_prev_config = use_prev_config
         self.identifier = self.exp_name + "::" + self.run_time
         self.tasks:List[Task] = [] # List of tasks
         self.status = {}           # Task Running Status
@@ -45,7 +49,7 @@ class Experiment:
         for config in self.config_list:
             self.tasks.append(Task(config['args'], config['reqs']))
         
-        if os.path.exists(os.path.join("runs", self.exp_name, "tasks.json")):
+        if os.path.exists(os.path.join("runs", self.exp_name, "tasks.json")) and self.use_prev_config:
             self.load_task()
         else:
             self.save_task()
@@ -75,8 +79,9 @@ class Experiment:
         with open(os.path.join("runs", self.exp_name, self.run_time, "runinfo.json"), "w") as f:
             json.dump({
                 "Command": "python " + " ".join(sys.argv[1:]),
-                "RunList": self.run_list,
+                "TaskArgs": [t.args for t in self.tasks],
                 "TaskReqs": [t.reqs for t in self.tasks],
+                "RunList": self.run_list,
             }, f, indent=2)
 
     def calc_run_list(self):

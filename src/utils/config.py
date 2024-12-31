@@ -4,11 +4,11 @@ import itertools
 import json
 import yaml
 from dataclasses import dataclass, is_dataclass, fields, MISSING
-from typing import Optional, Type, TypeVar, Any, get_type_hints
+from typing import Optional, Union, Type, TypeVar, get_type_hints
 from importlib.util import spec_from_file_location, module_from_spec
 
 T = TypeVar("T")
-def parse_structured_config(cls: Type[T], config: Optional[dict]) -> T:
+def parse_structured_config(cls: Type[T], config: dict) -> T:
     """
     Converts a nested dictionary to a dataclass object.
 
@@ -19,7 +19,6 @@ def parse_structured_config(cls: Type[T], config: Optional[dict]) -> T:
     Returns:
         An instance of the dataclass `cls` with the data populated.
     """
-    config = config or {}  # Default to an empty dictionary
     init_args = {}
     type_hints = get_type_hints(cls)  # Resolve actual types from string annotations
 
@@ -38,6 +37,8 @@ def parse_structured_config(cls: Type[T], config: Optional[dict]) -> T:
                 init_args[field_name] = field.default
             elif field.default_factory is not MISSING:  # For default_factory
                 init_args[field_name] = field.default_factory()
+            elif is_dataclass(field_type):
+                init_args[field_name] = field_type() # If failed, will raise an Exception Here
             else:
                 raise ValueError(f"Missing required field: {field_name} in {cls}")
     
@@ -50,13 +51,20 @@ class Configurable:
 
     cfg: Config
 
-    def __init__(self, cfg: Optional[dict] = None) -> None:
-        super().__init__()
+    def __init__(self, cfg: Optional[Union[dict, Type[T]]] = None, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        cfg = cfg or {}  # Default to an empty dictionary
         config_cls = getattr(self, "Config", None)
         if config_cls is None or not is_dataclass(config_cls):
             raise AttributeError("Configurable classes must define a Config dataclass.")
         
-        self.cfg = parse_structured_config(config_cls, cfg)
+        if isinstance(cfg, config_cls):
+            self.cfg = cfg
+        elif isinstance(cfg, dict):
+            self.cfg = parse_structured_config(config_cls, cfg)
+        else:
+            raise TypeError("Config must be a dictionary or an instance of the Config dataclass.")
 
 def load_config_from_file(filepath):
     # 确保文件存在
@@ -117,7 +125,7 @@ class ConfigParser:
     config: a config file (.py) defines a constant dict CONFIG, with the following keys:
         'args'  (required): the base args. 
             ** CAN BE OVERWRITTEN BY CMDARGS & SCAN, PRIORITY: SCAN > CMDARGS > DEFAULT**
-            Note 1: Use '${}' to link to another parameter in args (e.g. 'Scheduler/epoch': '${Training/epoch}')
+            Note 1: Use '${}' to link to another parameter in args (e.g. 'Scheduler.epoch': '${Training.epoch}')
         'reqs'  (optional): the resources to run this program (dict with following keys)
             ** CAN BE OVERWRITTEN BY CMDARGS & SCAN, PRIORITY: SCAN > CMDARGS > DEFAULT**
             seed: seed for task (default None)
@@ -130,12 +138,12 @@ class ConfigParser:
             mulnode: allow multi node training (default False)
             debug: whether in debug mode, stop backup code (default False)
         'cmdargs' (optional): a dict with (name of cmdargs)-(linked param path in args)
-            e.g.: '--batchsize': 'Training/Batchsize'
+            e.g.: '--batchsize': 'Training.Batchsize'
         'scan'    (optional): a dict with (param path in args)-(a list of values to be scaned)
             all the combinations of the values will be enumerated 
             Note 1: the list can be replace by a dict to be scaned together
             Note 2: reqs parameter can be modified by adding ':' character before the key (e.g. ':seed': [1,2,3])
-            Note 3: to modify a parameter, use / to split. (e.g.: 'Training/Epochs': [1,2,3])
+            Note 3: to modify a parameter, use . to split. (e.g.: 'Training.Epochs': [1,2,3])
     """
     def __init__(self, parser):
         self.parser = parser
@@ -187,7 +195,7 @@ class ConfigParser:
         if name.startswith(':'): # Getting Running Params
             return params['reqs'][name[1:]]
         else:
-            names = name.split('/')
+            names = name.split('.')
             args = params['args']
             for i, n in enumerate(names):
                 if isinstance(args, list):
@@ -203,7 +211,7 @@ class ConfigParser:
             reqs = params['reqs']
             reqs[name[1:]] = modify_value
         else:
-            names = name.split('/')
+            names = name.split('.')
             args = params['args']
             for i, n in enumerate(names):
                 if isinstance(args, list):
