@@ -10,8 +10,8 @@ from .comm import SocketRunner
 from .status import RunnerStatus
 
 class Runner:
-    def __init__(self):
-        self.status = RunnerStatus()
+    def __init__(self, devices=None):
+        self.status = RunnerStatus(devices)
         self.socket = SocketRunner(self)
 
         self.pool:Dict[str, Task] = {}

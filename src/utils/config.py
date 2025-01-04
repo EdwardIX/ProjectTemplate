@@ -90,19 +90,24 @@ def load_config_from_file(filepath):
         raise AttributeError("The specified file does not contain a dictionary named 'CONFIG'.")
 
 class ListParser:
-    def __init__(self, ref):
+    def __init__(self, dtype=None, ref=None):
+        self.dtype = dtype
         self.ref = ref
     
     def __call__(self, s):
         out = s.strip().split(',')
-        if len(self.ref) != len(out):
-            for i in range(1, len(self.ref)):
-                assert type(self.ref[i]) == type(self.ref[0]), f"Different type encountered in reference list"
-            T = type(self.ref[0])
-            out = list(map(T, out))
-        else:
+        if self.dtype is not None:
             for i in range(len(out)):
-                out[i] = type(self.ref[i])(out[i])
+                out[i] = self.dtype(out[i])
+        elif self.ref is not None:
+            if len(self.ref) != len(out):
+                for i in range(1, len(self.ref)):
+                    assert type(self.ref[i]) == type(self.ref[0]), f"Different type encountered in reference list"
+                T = type(self.ref[0])
+                out = list(map(T, out))
+            else:
+                for i in range(len(out)):
+                    out[i] = type(self.ref[i])(out[i])
         
         return out
 
@@ -192,19 +197,22 @@ class ConfigParser:
         return cmdargs
     
     def _get_params(self, params, name):
-        if name.startswith(':'): # Getting Running Params
-            return params['reqs'][name[1:]]
-        else:
-            names = name.split('.')
-            args = params['args']
-            for i, n in enumerate(names):
-                if isinstance(args, list):
-                    n = int(n)
+        try:
+            if name.startswith(':'): # Getting Running Params
+                return params['reqs'][name[1:]]
+            else:
+                names = name.split('.')
+                args = params['args']
+                for i, n in enumerate(names):
+                    if isinstance(args, list):
+                        n = int(n)
 
-                if i != len(names) - 1:
-                    args = args[n]
-                else:
-                    return args[n]
+                    if i != len(names) - 1:
+                        args = args[n]
+                    else:
+                        return args[n]
+        except Exception as e:
+            raise ValueError(f"Get {name} in config file error: {str(e)}") from e
     
     def _modify_params(self, params, name, modify_value):
         if name.startswith(':'): # Modify Running Params
@@ -248,7 +256,7 @@ class ConfigParser:
             k = (k if k.startswith('--') else '--' + k)
             p = self._get_params(self.params, v)
             if isinstance(p, list):
-                parser.add_argument(k, type=ListParser(p), default=None)
+                parser.add_argument(k, type=ListParser(ref=p), default=None)
             elif isinstance(p, bool):
                 parser.add_argument(k, type=BoolParser(), default=None)
             else:

@@ -72,7 +72,9 @@ class Task:
         def get_avail_gpus(s): # Return all available gpus on single node, Ranked as Priority
             gpu_prio_list = []
             for i in range(len(s.gpumem)):
-                if s.gpumem[i] >= self.reqs['gpumem'] and 100-s.gpuusg[i] >= self.reqs['gpuusg'] \
+                if s.available(i) \
+                   and s.gpumem[i] >= self.reqs['gpumem'] \
+                   and 100-s.gpuusg[i] >= self.reqs['gpuusg'] \
                    and s.gpumem[i] + s.gpumymem[i] - s.taskmem[i] >= self.reqs['gpumem'] \
                    and s.taskpro[i] < self.reqs['gpupro'] \
                    and (s.gpupro[i] - s.gpumypro[i] == 0 or self.reqs['occupy']):
@@ -111,7 +113,7 @@ class Task:
 
     def run_python(self, gpu, path, taskid, repeatid, seed):
         current_env = {
-            "CUDA_VISIBLE_DEVICE": str(gpu),
+            "CUDA_VISIBLE_DEVICES": str(gpu),
         }
 
         self.process = sp.Popen(['python', __file__,
@@ -127,7 +129,7 @@ class Task:
 
     def run_torchrun_multinode(self, nnodes, node_rank, gpu_ids, path, taskid, repeatid, seed):
         current_env = {
-            "CUDA_VISIBLE_DEVICE": ','.join(map(str, gpu_ids)),
+            "CUDA_VISIBLE_DEVICES": ','.join(map(str, gpu_ids)),
         }
 
         if node_rank == 0:
@@ -163,11 +165,12 @@ class Task:
 
     def run_torchrun_singlenode(self, gpu_ids, path, taskid, repeatid, seed):
         current_env = {
-            "CUDA_VISIBLE_DEVICE": ','.join(map(str, gpu_ids)),
+            "CUDA_VISIBLE_DEVICES": ','.join(map(str, gpu_ids)),
         }
         
         self.process = sp.Popen(['torchrun',
-                                 '--standalone',
+                                 '--rdzv-backend=c10d',
+                                 f'--rdzv-endpoint=localhost:{find_free_port()}', # Handle Multiple task on single machine
                                  '--nnodes=1',
                                  f'--nproc-per-node={len(gpu_ids)}',
                                  __file__,
@@ -209,8 +212,7 @@ def subprocess(args, info):
     """This method will be the target of subprocess and started as a new process."""
     # 1: Set Gpu run environment:
     import torch
-    torch.cuda.set_device(info['device'])
-    torch.set_default_dtype(torch.float32)
+    torch.set_default_dtype(torch.float32) # TODO: Use more complex precision setting (eg Mixed...). This should not be set
 
     # 2: Set Random Seed
     import numpy as np
@@ -257,8 +259,9 @@ def subprocess(args, info):
                 }, f, indent=4)
         exit(0)
 
-    signal.signal(signal.SIGTERM, summary)
-    signal.signal(signal.SIGINT, summary)
+    if info['rank'] == 0:
+        signal.signal(signal.SIGTERM, summary)
+        signal.signal(signal.SIGINT, summary)
 
     # 5: Load, Setup stat (the target is in main.py:target)
     spec = importlib.util.spec_from_file_location("target", os.path.join(get_parent_dir(info['path'], 4), "main.py"))
@@ -300,7 +303,7 @@ if __name__ == "__main__":
             'taskid': args.taskid,
             'repeatid': args.repeatid,
             'seed': args.seed,
-            'device': "cuda:" + os.environ['CUDA_VISIBLE_DEVICE'],
+            'device': "cuda:0",
             'localrank': 0,
             'localworldsize': 1, 
             'rank': 0,
@@ -313,7 +316,7 @@ if __name__ == "__main__":
             'taskid': args.taskid,
             'repeatid': args.repeatid,
             'seed': args.seed,
-            'device': "cuda:" + os.environ['CUDA_VISIBLE_DEVICE'].split(',')[int(os.environ['LOCAL_RANK'])],
+            'device': f"cuda:{os.environ['LOCAL_RANK']}",
             'localrank': int(os.environ['LOCAL_RANK']),
             'localworldsize': int(os.environ['LOCAL_WORLD_SIZE']),
             'rank': int(os.environ['RANK']),

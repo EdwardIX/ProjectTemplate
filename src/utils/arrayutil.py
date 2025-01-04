@@ -47,24 +47,24 @@ def to_dtype(data, dtype):
     else:
         raise NotImplementedError(f"Unsupported Data Type: {type(data)}")
 
-def to_backend(data, backend='np'):
+def to_backend(data, backend='np', **factory_kwargs):
     """
     convert all tensor / numpy in data to specific backend
     """
     if isinstance(data, dict):
-        return {k:to_backend(v, backend) for k, v in data.items()}
+        return {k:to_backend(v, backend, **factory_kwargs) for k, v in data.items()}
     elif isinstance(data, list):
-        return list(to_backend(v, backend) for v in data)
+        return list(to_backend(v, backend, **factory_kwargs) for v in data)
     elif isinstance(data, tuple):
-        return tuple(to_backend(v, backend) for v in data)
+        return tuple(to_backend(v, backend, **factory_kwargs) for v in data)
     else:
         if backend == 'np' or backend == 'numpy':
             if isinstance(data, torch.Tensor):
-                return data.detach().cpu().numpy()
+                return np.asarray(data.detach().cpu(), **factory_kwargs)
             else:
-                return np.array(data)
+                return np.asarray(data, **factory_kwargs)
         elif backend == 'torch':
-            return torch.as_tensor(data)
+            return torch.as_tensor(data, **factory_kwargs)
         else:
             raise NotImplementedError(f"Unsupported Backend {backend}")
 

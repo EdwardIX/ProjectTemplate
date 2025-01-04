@@ -194,19 +194,18 @@ class Logger:
         if global_step is None: 
             global_step = self._get_default_global_step()
         for name, value in scalars.items():
+            if group is not None:
+                name = f"{group}/{name}"
             try:
                 if value is None:
                     value = np.nan
                 if isinstance(value, torch.Tensor):
-                    value = value.detach().cpu().numpy()
-                scalars[name] = float(value)
+                    value = value.item()
+
+                self.writer.add_scalar(name, float(value), global_step=global_step)
+                self.history[global_step][name] = float(value)
             except Exception as e:
                 self.error(f"Cannot Convert scalar to float: check values in logger.add_scalars. Msg: {e}")
-            
-            if group is not None:
-                name = f"{group}/{name}"
-            self.writer.add_scalar(name, value, global_step=global_step)
-            self.history[global_step][name] = float(value)
         
         if not isinstance(verbose, bool):
             assert isinstance(verbose, int) and verbose > 0

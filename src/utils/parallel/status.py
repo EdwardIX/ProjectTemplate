@@ -1,10 +1,18 @@
 import pickle
 import json
 import subprocess as sp
+import os
 
 class RunnerStatus:
-    def __init__(self):
+    def __init__(self, devices=None):
         self.username = sp.check_output(['whoami']).decode().strip()
+
+        cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+        if cuda_devices is not None: 
+            cuda_devices = set(map(int, cuda_devices.split(',')))
+            self.devices = cuda_devices & set(devices) if devices is not None else cuda_devices
+        else:
+            self.devices = devices
 
         # Informations from gpustat
         self.gpumem = []
@@ -16,6 +24,13 @@ class RunnerStatus:
         # Informations from task
         self.taskmem = []
         self.taskpro = []
+
+    def available(self, idx):
+        if idx >= len(self.gpumem):
+            return False
+        if self.devices is None:
+            return True
+        return idx in self.devices
 
     def update(self):
         gpustat = json.loads(sp.check_output(['gpustat', '--json']).decode())
@@ -40,6 +55,7 @@ class RunnerStatus:
 
     def pack(self):
         return pickle.dumps((
+            self.devices,
             self.gpumem,
             self.gpuusg,
             self.gpupro,
@@ -50,7 +66,8 @@ class RunnerStatus:
         ))
     
     def unpack(self, data):
-        (
+        (  
+            self.devices,
             self.gpumem,
             self.gpuusg,
             self.gpupro,

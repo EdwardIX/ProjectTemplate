@@ -162,8 +162,8 @@ class Experiment:
                     return False
         return True
 
-    def run_local(self):
-        status = RunnerStatus()
+    def run_local(self, devices=None):
+        status = RunnerStatus(devices)
 
         self.prepare()
         while not self.finished():
