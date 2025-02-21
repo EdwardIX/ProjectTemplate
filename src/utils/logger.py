@@ -9,12 +9,11 @@ import traceback
 import pandas as pd
 import matplotlib.pyplot as plt
 from collections import defaultdict
+from PIL import Image
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
-
-from .plot import plot_heatmap, plot_lines, plot_hist
 
 def colored(text, color):
     # ANSI color codes for text
@@ -115,6 +114,8 @@ class Logger:
         self.logger = None
         self.status = None
         self.log_images = True
+
+        self.timers = {}
     
     def initialize(self, log_dir, taskid, repeatid):
         self.taskstr = f" [{taskid} - {repeatid}] "
@@ -145,8 +146,10 @@ class Logger:
         caller_line = caller_frame[2]
         return f"{caller_file}:{caller_line}"
 
-    def _get_default_global_step(self):
-        return getattr(self.status, 'global_step', None)
+    def _get_default_global_step(self, key=None):
+        if key is None:
+            return getattr(self.status, 'global_step', None)
+        return getattr(self.status, key, None)
 
     def info(self, *messages, once=False):
         if self.logger:
@@ -188,11 +191,11 @@ class Logger:
             for item in items:
                 _recursive_debug(item)
     
-    def add_scalars(self, scalars, global_step=None, group=None, verbose=True):
+    def add_scalars(self, scalars, global_step=None, group=None, verbose=False):
         if not self.writer:
             return
-        if global_step is None: 
-            global_step = self._get_default_global_step()
+        if global_step is None or isinstance(global_step, str): 
+            global_step = self._get_default_global_step(global_step)
         for name, value in scalars.items():
             if group is not None:
                 name = f"{group}/{name}"
@@ -238,72 +241,67 @@ class Logger:
             print("-" * length)
             print("")
 
-    def save_figure_data(self, figtype, name, data, global_step=None, group=None):
-        savepath = os.path.join(self.logdir, 'figures')
-        if group is not None:
-            savepath = os.path.join(savepath, group)
-        if global_step is None: 
-            global_step = self._get_default_global_step()
+    def save_data(self, name, data, global_step=None, group=None):
+        if global_step is None or isinstance(global_step, str): 
+            global_step = self._get_default_global_step(global_step)
+        if self.writer:
+            savepath = os.path.join(self.logdir, 'data')
+            if group is not None:
+                savepath = os.path.join(savepath, group)
+            os.makedirs(savepath, exist_ok=True)
+            savepath = os.path.join(savepath, f"{name}-step{0 if global_step is None else global_step}.pkl")
+            with open(savepath, 'wb') as f:
+                pickle.dump(data, f)
 
-        os.makedirs(savepath, exist_ok=True)
-        savepath = os.path.join(savepath, f"{figtype}-{name.replace('/', '-')}-step{0 if global_step is None else global_step}.pkl")
-        with open(savepath, 'wb') as f:
-            pickle.dump(data, f)
-
-    def add_image(self, name, image, global_step=None, dataformats='CHW'):
-        if global_step is None: 
-            global_step = self._get_default_global_step()
+    def add_image(self, name, image, global_step=None, group=None, dataformats='CHW'):
+        if global_step is None or isinstance(global_step, str):
+            global_step = self._get_default_global_step(global_step)
         if self.writer and self.log_images:
-            self.writer.add_image(name, image, global_step=global_step, dataformats=dataformats)
+            writer_name = f"{group}/{name}" if group is not None else name
+            self.writer.add_image(writer_name, image, global_step=global_step, dataformats=dataformats)
+
+            savepath = os.path.join(self.logdir, 'figure')
+            if group is not None:
+                savepath = os.path.join(savepath, group)
+            os.makedirs(savepath, exist_ok=True)
+            savepath = os.path.join(savepath, f"{name}-step{0 if global_step is None else global_step}.png")
+            # Convert image to HWC format for saving if needed
+            if dataformats == 'CHW':
+                image = np.transpose(image, (1, 2, 0))
+            # Convert image to uint8 format if it's not
+            if image.dtype != np.uint8:
+                image = (255 * (image - image.min()) / (image.max() - image.min())).astype(np.uint8)
+            # Save the image
+            img = Image.fromarray(image)
+            img.save(savepath)
     
     def add_plt_image(self, name, fig:plt.Figure, global_step=None, group=None):
         if self.writer and self.log_images:
             fig.canvas.draw()
             img = np.array(fig.canvas.renderer.buffer_rgba())
-            if group is not None:
-                name = f"{group}/{name}"
-            self.writer.add_image(name, img, global_step=global_step, dataformats="HWC")
-
-    def add_heatmap(self, name, x, y, z, global_step=None, group=None, **kwargs):
-        if self.writer and self.log_images:
-            data = to_numpy(x), to_numpy(y), to_numpy(z)
-            self.save_figure_data('heatmap', name, data, global_step, group)
-            fig = plot_heatmap(*data, **kwargs)
-            self.add_plt_image(name, fig, global_step, group)
-            
-    def add_lines(self, name, x, y, global_step=None, group=None, **kwargs):
-        if self.writer and self.log_images:
-            data = to_numpy(x), to_numpy(y)
-            self.save_figure_data('lines', name, data, global_step, group)
-            fig = plot_lines(*data, **kwargs)
-            self.add_plt_image(name, fig, global_step, group)
-    
-    def add_hist(self, name, x, bins=50, global_step=None, group=None, **kwargs):
-        if self.writer and self.log_images:
-            data = to_numpy(x), to_numpy(bins)
-            self.save_figure_data('hist', name, data, global_step, group)
-            fig = plot_hist(*data, **kwargs)
-            self.add_plt_image(name, fig, global_step, group)
+            self.add_image(name, img, global_step=global_step, group=group, dataformats="HWC")
     
     def timer_start(self, name="default", reset=True, verbose=False):
         self.timers[name] = (0 if reset else self.timers.get(name, 0)) - time.time()
-        if verbose:
+        if self.logger and verbose:
             caller_info = self._get_caller_info()
             namestr = name if isinstance(verbose, bool) else verbose
             print(colored(f"[TIMER] [{caller_info}] start timing {namestr}", 'blue'))
 
     def timer_stop(self, name="default", verbose=False):
         self.timers[name] = self.timers[name] + time.time()
-        if verbose:
+        if self.logger and verbose:
             caller_info = self._get_caller_info()
             namestr = name if isinstance(verbose, bool) else verbose
             print(colored(f"[TIMER] [{caller_info}] {namestr} took {self.timers[name]} s", 'blue'))
         return self.timers[name]
     
     def timer_get(self, name="default", verbose=False):
+        if isinstance(name, (list, tuple, set)):
+            return {n:self.timer_get(n, verbose=verbose) for n in name}
         # Add current time If The current timer is running
         timer_time = self.timers[name] + time.time() if self.timers[name] < 0 else self.timers[name]
-        if verbose:
+        if self.logger and verbose:
             caller_info = self._get_caller_info()
             namestr = name if isinstance(verbose, bool) else verbose
             print(colored(f"[TIMER] [{caller_info}] {namestr} took {timer_time} s", 'blue'))
@@ -311,7 +309,7 @@ class Logger:
 
     def timer_reset(self, name="default"):
         self.timers[name] = 0
-    
+
     def summary(self, path):
         if len(self.history) == 0:
             return {}

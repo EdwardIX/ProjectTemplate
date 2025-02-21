@@ -3,14 +3,20 @@ import os
 import time
 import json
 import threading
-from typing import Dict
+from typing import Dict, List, Optional, Union
 
 from .task import Task
 from .comm import SocketRunner
 from .status import RunnerStatus
 
 class Runner:
-    def __init__(self, devices=None):
+    """
+    A runner that runs multiple tasks in parallel.
+    Components:
+        self.status:  Runner status
+        self.pool: All the active tasks
+    """
+    def __init__(self, devices:Optional[Union[List[int], str]]=None):
         self.status = RunnerStatus(devices)
         self.socket = SocketRunner(self)
 
@@ -22,8 +28,8 @@ class Runner:
     def on_update_status(self):
         self.status.update()
 
-    def on_run_task(self, identifier, args, reqs, gpuinfo, seed):
-        task = Task(args, reqs)
+    def on_run_task(self, identifier, target, args, reqs, gpuinfo, seed): # Start a new task
+        task = Task(target, args, reqs)
         with self.pool_lock:
             self.pool[identifier] = task
         exp_name, run_time, i, j = re.match(r"(.*)::([\d\.]{8}-[\d\.]{8}):(\d+)-(\d+)", identifier).groups()
@@ -36,19 +42,21 @@ class Runner:
                  path = os.path.join("runs", exp_name, run_time, f"{i}-{j}"), \
                  taskid = i, \
                  repeatid = j, \
-                 seed = seed)
-        try:
-            for gid in gpuinfo[self.socket.hostname]:
-                self.status.start_task(gid, task.reqs)
-        except Exception as e:
-            print(gpuinfo[self.socket.hostname], task.gpuids)
-            print(e)
+                 seed = seed,
+                 localsrc = False,
+                 loginfo = {
+                     'start time': time.strftime("%y.%m.%d-%H:%M:%S"),
+                     'gpuinfo': gpuinfo,
+                 })
+        for gid in gpuinfo[self.socket.hostname]: # Update Status
+            self.status.start_task(gid, task.reqs)
 
-    def on_stop_task(self, identifier):
+    def on_stop_task(self, identifier): # UI: Stop single task
         if identifier in self.pool.keys(): # The Task is still active
-            self.pool[identifier].terminate()
+            t = self.pool[identifier]
+            t.terminate()
     
-    def on_stop_all_task(self):
+    def on_stop_all_task(self): # UI: Stop All tasks
         with self.pool_lock:
             for n, t in self.pool.items():
                 t.terminate()
@@ -66,7 +74,7 @@ class Runner:
         for gid in task.gpuids:
             self.status.end_task(gid, task.reqs)
 
-    def run(self):
+    def run(self): # Main thread
         try:
             while self.socket.connected:
                 inactive_tasks = []
@@ -83,5 +91,7 @@ class Runner:
         
         except Exception as e:
             print(e)
-        finally:
+        finally: # Stop all running task and report to server
             self.on_stop_all_task()
+            for n, t in self.pool.items():
+                self.on_task_finished(n)

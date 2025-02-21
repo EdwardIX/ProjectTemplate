@@ -29,6 +29,18 @@ def find_free_port():
     
     return port
 
+def get_func_by_path(path, func_name):
+    spec = importlib.util.spec_from_file_location("temp_module", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, func_name)
+    return func
+
+def get_func_by_module_name(module_name, func_name):
+    module = importlib.import_module(module_name)
+    func = getattr(module, func_name)
+    return func
+
 def parse_seed(seed, i, j):
     random.seed(int(time.time()) ^ os.getpid())
     if seed == "Random":
@@ -57,7 +69,8 @@ class HookedOutput():
         self.file.flush()
 
 class Task:
-    def __init__(self, args, reqs):
+    def __init__(self, target, args, reqs):
+        self.target = target
         self.args = args
         self.reqs = reqs
 
@@ -66,7 +79,7 @@ class Task:
         self.gpuids = None
     
     def copy(self):
-        return Task(self.args, self.reqs)
+        return Task(self.target, self.args, self.reqs)
 
     def runnable(self, status):
         def get_avail_gpus(s): # Return all available gpus on single node, Ranked as Priority
@@ -76,7 +89,7 @@ class Task:
                    and s.gpumem[i] >= self.reqs['gpumem'] \
                    and 100-s.gpuusg[i] >= self.reqs['gpuusg'] \
                    and s.gpumem[i] + s.gpumymem[i] - s.taskmem[i] >= self.reqs['gpumem'] \
-                   and s.taskpro[i] < self.reqs['gpupro'] \
+                   and (s.taskpro[i] < self.reqs['gpupro'] or self.reqs['gpupro'] == -1) \
                    and (s.gpupro[i] - s.gpumypro[i] == 0 or self.reqs['occupy']):
                     gpu_prio_list.append((s.gpupro[i], s.gpuusg[i], i))
             gpu_prio_list.sort()
@@ -111,7 +124,7 @@ class Task:
     
             return None
 
-    def run_python(self, gpu, path, taskid, repeatid, seed):
+    def run_python(self, gpu, path, taskid, repeatid, seed, localsrc):
         current_env = {
             "CUDA_VISIBLE_DEVICES": str(gpu),
         }
@@ -123,11 +136,11 @@ class Task:
                                  '--taskid', str(taskid),
                                  '--repeatid', str(repeatid),
                                  '--seed', str(seed),
-                                 '--debug', str(self.reqs['debug'])],
+                                 '--localsrc', str(localsrc)],
                                 cwd=os.getcwd(),
                                 env = {**os.environ, **current_env})
 
-    def run_torchrun_multinode(self, nnodes, node_rank, gpu_ids, path, taskid, repeatid, seed):
+    def run_torchrun_multinode(self, nnodes, node_rank, gpu_ids, path, taskid, repeatid, seed, localsrc):
         current_env = {
             "CUDA_VISIBLE_DEVICES": ','.join(map(str, gpu_ids)),
         }
@@ -159,11 +172,11 @@ class Task:
                                  '--taskid', str(taskid),
                                  '--repeatid', str(repeatid),
                                  '--seed', str(seed),
-                                 '--debug', str(self.reqs['debug'])],
+                                 '--localsrc', str(localsrc)],
                                 cwd = os.getcwd(),
                                 env = {**os.environ, **current_env})
 
-    def run_torchrun_singlenode(self, gpu_ids, path, taskid, repeatid, seed):
+    def run_torchrun_singlenode(self, gpu_ids, path, taskid, repeatid, seed, localsrc):
         current_env = {
             "CUDA_VISIBLE_DEVICES": ','.join(map(str, gpu_ids)),
         }
@@ -180,30 +193,49 @@ class Task:
                                  '--taskid', str(taskid),
                                  '--repeatid', str(repeatid),
                                  '--seed', str(seed),
-                                 '--debug', str(self.reqs['debug'])],
+                                 '--localsrc', str(localsrc)],
                                 cwd = os.getcwd(),
                                 env = {**os.environ, **current_env})
 
-    def run(self, nnodes, node_rank, gpuids, path, taskid, repeatid, seed):
+    def run(self, nnodes, node_rank, gpuids, path, taskid, repeatid, seed, localsrc, loginfo={}):
         self.gpuids = gpuids
+        # TODO: Start a new process by directly start the target python script
+        # Log Task Info
         os.makedirs(path, exist_ok=True)
+        if node_rank == 0:
+            with open(os.path.join(path, 'task.json'), 'w') as f:
+                json.dump({
+                    **loginfo,
+                    'path': path,
+                    'taskid': taskid,
+                    'repeatid': repeatid,
+                    'seed': seed,
+                    'args': self.args,
+                    'reqs': self.reqs
+                }, f, indent=4)
+                
+        # Run Task
         if nnodes > 1:
-            self.run_torchrun_multinode(nnodes, node_rank, gpuids, path, taskid, repeatid, seed)
+            self.run_torchrun_multinode(nnodes, node_rank, gpuids, path, taskid, repeatid, seed, localsrc)
         elif len(gpuids) > 1:
-            self.run_torchrun_singlenode(gpuids, path, taskid, repeatid, seed)
+            self.run_torchrun_singlenode(gpuids, path, taskid, repeatid, seed, localsrc)
         else:
-            self.run_python(gpuids[0], path, taskid, repeatid, seed)
-    
+            self.run_python(gpuids[0], path, taskid, repeatid, seed, localsrc)
+
     def alive(self):
-        return (self.process.poll() == None)
+        return (self.process and self.process.poll() == None)
 
     def terminate(self):
-        self.process.terminate()
+        if self.process:
+            self.process.terminate()
         self.process=None
         self.gpuids=None
 
     def join(self):
-        retcode = self.process.wait()
+        if self.process:
+            retcode = self.process.wait()
+        else:
+            retcode = None
         self.process=None
         self.gpuids=None
         return retcode
@@ -214,7 +246,7 @@ def subprocess(args, info):
     import torch
     torch.set_default_dtype(torch.float32) # TODO: Use more complex precision setting (eg Mixed...). This should not be set
 
-    # 2: Set Random Seed
+    # 2: Set Random Seed (TODO: Assign Same Seed for every proc?)
     import numpy as np
     if info['seed'] is not None:
         torch.manual_seed(info['seed'])
@@ -225,7 +257,7 @@ def subprocess(args, info):
     import os
     import sys
     def get_parent_dir(path, n): return os.path.dirname(get_parent_dir(path, n-1)) if n else path
-    sys.path.append(get_parent_dir(info['path'], (4 if info['debug'] else 1))) # Source code is in rundir/../src, set the root to src
+    sys.path.append(get_parent_dir(info['path'], (4 if info['localsrc'] else 1))) # Source code is in rundir/../src, set the root to src
     from src.utils.logger import logger
     if info['rank'] == 0:
         import os
@@ -234,14 +266,14 @@ def subprocess(args, info):
         sys.stderr = HookedOutput(os.path.join(info['path'], "err.txt"), sys.stderr)
         logger.initialize(info['path'], info['taskid'], info['repeatid'])
 
-        with open(os.path.join(info['path'], 'task.json'), 'w') as f:
-            json.dump(info, f, indent=4)
-
     # 4: Set up Signal Handle function & Summary function
     ppid = os.getppid()
-    def summary(signum, *args):
+    def summary(signum, frame):
         if info['rank'] == 0 and os.getppid() == ppid: # Ensures only the main process enters this function
-            if signum is not None: print(f"Signal {signum} received!")
+            if signum is not None: 
+                print(f"\033[91m######### Signal {signum} received! #########\033[0m", file=sys.stderr)
+                print("Stack trace for signal:", file=sys.stderr)
+                traceback.print_stack(frame, file=sys.stderr)
             _, mem_peak = tracemalloc.get_traced_memory()
             mem_snapshot = tracemalloc.take_snapshot()
             tracemalloc.stop()
@@ -261,15 +293,22 @@ def subprocess(args, info):
 
     if info['rank'] == 0:
         signal.signal(signal.SIGTERM, summary)
-        signal.signal(signal.SIGINT, summary)
+        signal.signal(signal.SIGINT, summary) # Ctrl-C
 
-    # 5: Load, Setup stat (the target is in main.py:target)
-    spec = importlib.util.spec_from_file_location("target", os.path.join(get_parent_dir(info['path'], 4), "main.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    func = module.target
-    args = pickle.loads(args)
+    # 5: Try to load function, Setup stat
     exception = None
+    try:
+        func = get_func_by_module_name(os.path.join(get_parent_dir(info['path'], 4), 'main.py'), 'target')
+    except Exception as e:
+        exception = e
+    if exception:
+        try:
+            func = get_func_by_path(os.path.join(get_parent_dir(info['path'], 4), 'main.py'), 'target')
+            exception = None
+        except Exception as e:
+            exception = e
+
+    args = pickle.loads(args)
     start_time = {"Wall": time.time(), "User": time.process_time()}
     tracemalloc.start()
 
@@ -279,7 +318,7 @@ def subprocess(args, info):
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         exception = e
-    summary(None)
+    summary(None, None)
 
 if __name__ == "__main__":
     """
@@ -294,7 +333,7 @@ if __name__ == "__main__":
     parser.add_argument('--taskid', type=int)
     parser.add_argument('--repeatid', type=int)
     parser.add_argument('--seed', type=int)
-    parser.add_argument('--debug', type=str)
+    parser.add_argument('--localsrc', type=str)
     args = parser.parse_args()
 
     if args.mode == 'python':
@@ -308,7 +347,7 @@ if __name__ == "__main__":
             'localworldsize': 1, 
             'rank': 0,
             'worldsize': 1,
-            'debug': args.debug == 'True',
+            'localsrc': args.localsrc == 'True',
         }
     elif args.mode in ('torchrun_singlenode', 'torchrun_multinode'):
         info = {
@@ -321,7 +360,7 @@ if __name__ == "__main__":
             'localworldsize': int(os.environ['LOCAL_WORLD_SIZE']),
             'rank': int(os.environ['RANK']),
             'worldsize': int(os.environ['WORLD_SIZE']),
-            'debug': args.debug == 'True',
+            'localsrc': args.localsrc == 'True',
         }
 
     subprocess(base64.b64decode(args.args), info)

@@ -1,4 +1,3 @@
-import pickle
 import json
 import subprocess as sp
 import os
@@ -6,6 +5,9 @@ import os
 class RunnerStatus:
     def __init__(self, devices=None):
         self.username = sp.check_output(['whoami']).decode().strip()
+
+        if isinstance(devices, str):
+            devices = set(map(int, devices.split(',')))
 
         cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
         if cuda_devices is not None: 
@@ -24,6 +26,9 @@ class RunnerStatus:
         # Informations from task
         self.taskmem = []
         self.taskpro = []
+
+        # Raw output of gpustat
+        self.gpustat = None
 
     def available(self, idx):
         if idx >= len(self.gpumem):
@@ -44,6 +49,7 @@ class RunnerStatus:
             self.taskmem.extend([0] * (len(gpus) - len(self.taskmem)))
         if len(self.taskpro) < len(gpus):
             self.taskpro.extend([0] * (len(gpus) - len(self.taskpro)))
+        self.gpustat = sp.check_output(['gpustat']).decode()
 
     def start_task(self, gpuid, reqs):
         self.taskmem[gpuid] += reqs['gpumem']
@@ -52,32 +58,9 @@ class RunnerStatus:
     def end_task(self, gpuid, reqs):
         self.taskmem[gpuid] -= reqs['gpumem']
         self.taskpro[gpuid] -= 1
-
-    def pack(self):
-        return pickle.dumps((
-            self.devices,
-            self.gpumem,
-            self.gpuusg,
-            self.gpupro,
-            self.gpumymem,
-            self.gpumypro,
-            self.taskmem,
-            self.taskpro,
-        ))
-    
-    def unpack(self, data):
-        (  
-            self.devices,
-            self.gpumem,
-            self.gpuusg,
-            self.gpupro,
-            self.gpumymem,
-            self.gpumypro,
-            self.taskmem,
-            self.taskpro
-        ) = pickle.loads(data)
     
     def __str__(self):
         return f"<RunnerStatus hostname={sp.check_output(['hostname']).decode()} gpumem={self.gpumem} gpuusg={self.gpuusg} gpupro={self.gpupro} gpumymem={self.gpumymem} gpumypro={self.gpumypro} taskmem={self.taskmem} taskpro={self.taskpro}>"
+    
     def __repr__(self):
         return str(self)

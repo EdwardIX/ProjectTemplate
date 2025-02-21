@@ -53,7 +53,8 @@ def get_scheduler(name):
         raise NotImplementedError
 
 def parse_scheduler(config, optimizer, steps_per_epoch=None):
-    if config is None: return None
+    if config is None or config.name == "None": 
+        return lr_scheduler.ConstantLR(optimizer, factor=1) # Constant LR with no effect
     assert config.interval in ["epoch", "step"]
     if config.name == "SequentialLR":
         return lr_scheduler.SequentialLR(

@@ -1,4 +1,5 @@
 import os
+import re
 import copy
 import itertools
 import json
@@ -22,6 +23,12 @@ def parse_structured_config(cls: Type[T], config: dict) -> T:
     init_args = {}
     type_hints = get_type_hints(cls)  # Resolve actual types from string annotations
 
+    # Ensure all keys in config are valid fields of cls
+    valid_fields = {field.name for field in fields(cls)}
+    invalid_keys = set(config.keys()) - valid_fields
+    if invalid_keys:
+        raise ValueError(f"Invalid keys in config: {invalid_keys}")
+
     for field in fields(cls):
         field_name = field.name
         field_type = type_hints[field_name]  # Use resolved type hints
@@ -37,8 +44,11 @@ def parse_structured_config(cls: Type[T], config: dict) -> T:
                 init_args[field_name] = field.default
             elif field.default_factory is not MISSING:  # For default_factory
                 init_args[field_name] = field.default_factory()
-            elif is_dataclass(field_type):
-                init_args[field_name] = field_type() # If failed, will raise an Exception Here
+            elif is_dataclass(field_type): # Init the dataclass with default params
+                try:
+                    init_args[field_name] = field_type() # If failed (required params not specified), will raise an Exception Here
+                except Exception as e:
+                    raise ValueError(f"Required field {field_name} failed to initialize: {e}")
             else:
                 raise ValueError(f"Missing required field: {field_name} in {cls}")
     
@@ -131,17 +141,17 @@ class ConfigParser:
         'args'  (required): the base args. 
             ** CAN BE OVERWRITTEN BY CMDARGS & SCAN, PRIORITY: SCAN > CMDARGS > DEFAULT**
             Note 1: Use '${}' to link to another parameter in args (e.g. 'Scheduler.epoch': '${Training.epoch}')
+        'target'(optional): the target function to run (default: [main, target])
         'reqs'  (optional): the resources to run this program (dict with following keys)
             ** CAN BE OVERWRITTEN BY CMDARGS & SCAN, PRIORITY: SCAN > CMDARGS > DEFAULT**
             seed: seed for task (default None)
             numgpu: number of parallel gpus (default 1)
             gpumem: minimum memory requirement for each gpu (default 0)
             gpuusg: minimum gpu usage required to run this program (default 0)
-            gpupro: maximum gpu programs running on each gpu, ignores others' program (default 1)
+            gpupro: maximum gpu programs running on each gpu, ignores others' program. Set to -1 to ignore. (default 1)
             occupy: use GPUs that others are currently using (default False)
             repeat: number of repeat needed (default 1)
             mulnode: allow multi node training (default False)
-            debug: whether in debug mode, stop backup code (default False)
         'cmdargs' (optional): a dict with (name of cmdargs)-(linked param path in args)
             e.g.: '--batchsize': 'Training.Batchsize'
         'scan'    (optional): a dict with (param path in args)-(a list of values to be scaned)
@@ -172,6 +182,7 @@ class ConfigParser:
             raise ValueError('the provided config file does not contains args argument')
         
         self.params = { # The default setting for params
+            "target": config['target'] if 'target' in config else ('main', 'target'),
             "args": config['args'],
             "reqs": {
                 'seed': "Random",
@@ -182,7 +193,6 @@ class ConfigParser:
                 'repeat': 1,
                 'occupy': False,
                 'mulnode': False,
-                'debug': False,
                 **config.get('reqs', {}), # Overwrite default settings
             }
         }
@@ -235,9 +245,12 @@ class ConfigParser:
             if isinstance(v, dict):
                 self.interpolate_params(v, ref_params)
             elif isinstance(v, str):
-                if v.startswith("${") and v.endswith("}"):
-                    name = v[2:-1]
-                    params[k] = self._get_params(ref_params, name)
+                if re.search(r"\${(.*?)}", v):
+                    v = re.sub(r"\${(.*?)}", lambda x: str(self._get_params(ref_params, x.group(1))), v)
+                    try:
+                        params[k] = eval(v)
+                    except Exception as e:
+                        raise ValueError(f"Failed to interpolate param {k} (parsed as {v}) in config file: {str(e)}") from e
 
     def add_parser_args(self, parser):
         # for runreq arguments
@@ -249,7 +262,6 @@ class ConfigParser:
         parser.add_argument('--repeat', type=int, default=None)
         parser.add_argument('--occupy', type=BoolParser(), default=None)
         parser.add_argument('--mulnode', type=BoolParser(), default=None)
-        parser.add_argument('--debug', action='store_true', default=None)
 
         # for cmdargs arguments
         for k, v in self.cmdargs.items():

@@ -15,19 +15,19 @@ from .comm import SocketClient
 from .status import RunnerStatus
 
 class Experiment:
-    def __init__(self, config_list, exp_name="Test", run_list="All", use_prev_config=False):
+    def __init__(self, config_list, exp_name="Test", run_list="All", share_config="check"):
         """
         Create a Group of Task
         config_list: the list of config for each task
         exp_name: the name of this experiment
         run_list: the list of tasks to be run
-        use_prev_config: for the same exp_name, keep using the same config
+        share_config: for the same exp_name, share the same config (true / false(override) / check)
         """
         self.config_list = config_list
         self.run_list = run_list
         self.exp_name = exp_name
         self.run_time = "Null"
-        self.use_prev_config = use_prev_config
+        self.share_config = share_config.lower()
         self.identifier = self.exp_name + "::" + self.run_time
         self.tasks:List[Task] = [] # List of tasks
         self.status = {}           # Task Running Status
@@ -35,8 +35,15 @@ class Experiment:
     def send_to_server(self):
         client = SocketClient("Experiment")
         client.send_message(pickle.dumps(self))
+        success, msg = pickle.loads(client.recv_message())
         client.close()
-        print("Experiment Sent to Server")
+        if success:
+            if msg == "Success":
+                print(f"\033[92m############  Successfully send Experiment to Server  ############\033[0m")
+            else:
+                print(f"\033[33m############  Server Warning: {msg} ############\033[0m")
+        else:
+            print(f"\033[91m############  Failed to send Experiment to Server: {msg} ############\033[0m")
 
     def prepare(self):
         self.run_time = time.strftime('%y.%m.%d-%H.%M.%S')
@@ -47,26 +54,39 @@ class Experiment:
         shutil.copytree("src", os.path.join(rootpath, "src"), ignore=shutil.ignore_patterns("*.pyc", "__pycache__")) # Code Backup
         
         for config in self.config_list:
-            self.tasks.append(Task(config['args'], config['reqs']))
+            self.tasks.append(Task(config['target'], config['args'], config['reqs']))
         
-        if os.path.exists(os.path.join("runs", self.exp_name, "tasks.json")) and self.use_prev_config:
-            self.load_task()
+        if os.path.exists(os.path.join("runs", self.exp_name, "tasks.json")):
+            if self.share_config == 'false':
+                self.save_task()
+                success, msg = self.calc_run_list()
+            elif self.share_config == 'check':
+                return False, "The same experiment name detected, please specify share_config"
+            elif self.share_config == 'true':
+                msg = self.load_task()
+                success, _msg = self.calc_run_list()
+                if _msg != "Success":
+                    msg = msg + '; ' + _msg
         else:
             self.save_task()
-        self.calc_run_list()
+            success, msg = self.calc_run_list()
+        
         self.save_runinfo()
+        
+        return success, msg
 
     def load_task(self):
         with open(os.path.join("runs", self.exp_name, "tasks.json"), "r") as f:
             task_config = json.load(f)["TaskArgs"]
             if len(task_config) != len(self.tasks):
-                print(f"\033[91m############  Server Warning: different number of Tasks detected, replace both task config and requirements ############\033[0m")
+                msg = "different number of Tasks detected, replace both task config and requirements"
                 task_reqs = json.load(f)["TaskReqs"]
                 self.tasks = [(c, r) for c, r in zip(task_config, task_reqs)]
             else:
-                print(f"\033[33m############  Server Warning: Load Task List from existing file. Current Task List replaced  ############\033[0m")
+                msg = "Load Task List from existing file. Current Task List replaced"
                 for i, t in enumerate(self.tasks):
                     t.args = task_config[i]
+        return msg
 
     def save_task(self):
         with open(os.path.join("runs", self.exp_name, "tasks.json"), "w") as f:
@@ -78,10 +98,9 @@ class Experiment:
     def save_runinfo(self):
         with open(os.path.join("runs", self.exp_name, self.run_time, "runinfo.json"), "w") as f:
             json.dump({
-                "Command": "python " + " ".join(sys.argv[1:]),
-                "TaskArgs": [t.args for t in self.tasks],
-                "TaskReqs": [t.reqs for t in self.tasks],
+                "Command": "python " + " ".join(sys.argv),
                 "RunList": self.run_list,
+                "Tasks": [{"target": t.target, "args": t.args, "reqs": t.reqs} for t in self.tasks],
             }, f, indent=2)
 
     def calc_run_list(self):
@@ -104,15 +123,19 @@ class Experiment:
                         with open(path) as f: return not json.load(f)["success"]
                     
                     self.run_list = list(filter(self.run_list, is_failed))
+                    if self.share_config == 'false':
+                        return True, "Load RunList from previous run, this might cause error when TaskConfig changed"
                 else:
                     self.run_list = [(i, j) for i, t in enumerate(self.tasks) for j in range(t.reqs["repeat"])]
             else:
-                raise ValueError(f"Unknown RunList Type: {self.run_list}")
+                return False, f"Unknown RunList Type: {self.run_list}"
         elif not isinstance(self.run_list, list):
-            raise ValueError(f"Unknown RunList Type: {type(self.run_list)}")
+            return False, f"Unknown RunList Type: {type(self.run_list)}"
+    
+        return True, "Success"
 
     def add_task(self, config):
-        self.tasks.append(Task(config['args'], config['reqs']))
+        self.tasks.append(Task(config['target'], config['args'], config['reqs']))
 
     def get_task_status(self, i, j):
         if (i, j) not in self.run_list:
@@ -134,21 +157,12 @@ class Experiment:
     def set_task_status(self, i, j, s):
         assert s in ("Waiting", "Running", "Success", "Failed", "Skipped"), f"Unknown task status {s}"
         self.status[(i, j)] = s
-    
-    def log_task_runinfo(self, i, j, gpuinfo, seed):
-        os.makedirs(os.path.join("runs", self.exp_name, self.run_time, f"{i}-{j}"), exist_ok=True)
-        with open(os.path.join("runs", self.exp_name, self.run_time, f"{i}-{j}", "runinfo.json"), "w") as f:
-            json.dump({
-                "Start Time": time.strftime("%y.%m.%d-%H:%M:%S"),
-                "Seed": seed,
-                "gpuinfo": gpuinfo,
-            }, f, indent=2)
 
     def next_task(self, status):
         max_repeat = max([t.reqs['repeat'] for t in self.tasks])
         for j in range(max_repeat):
             for i, t in enumerate(self.tasks):
-                if t.reqs["repeat"] >= j and self.get_task_status(i, j) == "Waiting":
+                if j <= t.reqs["repeat"] and self.get_task_status(i, j) == "Waiting":
                     gpuinfo = t.runnable(status)
                     if gpuinfo: 
                         return (i, j), gpuinfo
@@ -158,14 +172,19 @@ class Experiment:
         max_repeat = max([t.reqs['repeat'] for t in self.tasks])
         for j in range(max_repeat):
             for i, t in enumerate(self.tasks):
-                if t.reqs["repeat"] > j and self.get_task_status(i, j) not in ("Success", "Failed"):
+                if j < t.reqs["repeat"] and self.get_task_status(i, j) not in ("Success", "Failed"):
                     return False
         return True
 
     def run_local(self, devices=None):
         status = RunnerStatus(devices)
 
-        self.prepare()
+        success, msg = self.prepare()
+        if not success:
+            print(f"\033[31mFailed to Prepare Experiment:{msg}\033[0m")
+            return
+        elif msg != "Success":
+            print(f"\033[33mWarning:{msg}\033[0m")
         while not self.finished():
             status.update()
             taskid, gpuinfo = self.next_task({'local': status})
@@ -175,7 +194,8 @@ class Experiment:
                 task = self.tasks[i].copy()
 
                 # Run Task
-                task.run(1, 0, gpuinfo['local'], path, i, j, parse_seed(task.reqs['seed'], i, j))
+                task.run(1, 0, gpuinfo['local'], path, i, j, parse_seed(task.reqs['seed'], i, j), True,
+                         loginfo = {'start time': time.strftime("%y.%m.%d-%H:%M:%S"), 'gpuinfo': gpuinfo})
                 print(f"\033[32m############  Experiment {self.identifier} Task {i}-{j} Start On {gpuinfo} ############\033[0m")
                 task.join()
 
@@ -190,15 +210,10 @@ class Experiment:
             else: # Experiment Not Finished, but waiting for gpu to run
                 time.sleep(10)
         
-        self.summary()
+        self.on_finished()
 
     def summary(self, process_func=None):
-        # Delete all __pycache__
-        for dirpath, dirnames, filenames in os.walk(os.path.join("runs", self.exp_name, self.run_time, "src")):
-            if '__pycache__' in dirnames:
-                pycache_path = os.path.join(dirpath, '__pycache__')
-                shutil.rmtree(pycache_path)
-        
+
         # Summary
         task_data = {}
         keys = ['last', 'last_5', 'last_10', 'all']
@@ -266,3 +281,17 @@ class Experiment:
             dfs[key] = df
             df.to_csv(os.path.join(os.path.join("runs", self.exp_name, self.run_time), f"stat_{key}.csv"), index=False)
         return dfs
+
+    
+    def on_finished(self):
+        if os.path.exists(os.path.join("runs", self.exp_name, self.run_time, "src")):
+            # Delete src folder
+            shutil.rmtree(os.path.join("runs", self.exp_name, self.run_time, "src"))
+
+        # Old: Delete __pycache__ in src
+        # for dirpath, dirnames, filenames in os.walk(os.path.join("runs", self.exp_name, self.run_time, "src")):
+        #     if '__pycache__' in dirnames:
+        #         pycache_path = os.path.join(dirpath, '__pycache__')
+        #         shutil.rmtree(pycache_path)
+        
+        self.summary()
