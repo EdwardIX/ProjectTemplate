@@ -11,12 +11,9 @@ if st.button('刷新数据'):
     st.rerun()  # 刷新页面
 
 # 显示实验列表
-st.subheader("所有实验")
-experiment_list = socket_web.get_experiment_list()
 
-experiment_list.sort(key=(lambda e: (e['finished'], e['start_time']))) # Put finished exps on the back
-for experiment in experiment_list:
-    with st.expander(f"实验: {experiment['name']} {'(已结束)' if experiment['finished'] else ''}"):
+def show_exp(experiment):
+    with st.expander(f"实验: {experiment['name']}"):
         st.markdown(f"**开始时间:** {experiment['start_time']}")
         st.markdown(f"**任务数量:** {experiment['num_tasks']}")
 
@@ -29,14 +26,35 @@ for experiment in experiment_list:
             status_table[j] = [experiment_status['task_status'].get((i, j), "--") for i in range(experiment['num_tasks'])]
         st.table(status_table)
 
-        # 停止实验按钮
         if not experiment['finished']:
+            # 停止实验按钮
             if st.button(f"停止实验 {experiment['id']}", key=f"stop_exp_{experiment['id']}"):
                 suc, msg = socket_web.cmd_stop_experiment(experiment['id'])
                 if suc:
                     st.success(f"实验 {experiment['id']} 已停止")
                 else:
                     st.error(f"实验 {experiment['id']} 停止失败：{msg}")
+        else:
+            # 删除实验按钮
+            if st.button(f"删除实验 {experiment['id']}", key=f"stop_exp_{experiment['id']}"):
+                suc, msg = socket_web.cmd_del_experiment(experiment['id'])
+                if suc:
+                    st.success(f"实验 {experiment['id']} 已删除")
+                else:
+                    st.error(f"实验 {experiment['id']} 删除失败：{msg}")
+
+st.subheader("正在运行的实验")
+experiment_list = socket_web.get_experiment_list()
+
+experiment_list.sort(key=(lambda e: e['start_time']), reverse=True) # Recent Exp First
+for experiment in experiment_list:
+    if not experiment['finished']:
+        show_exp(experiment)
+
+st.subheader("已经完成的实验")
+for experiment in experiment_list:
+    if experiment['finished']:
+        show_exp(experiment)
 
 # 显示正在运行的任务列表
 st.subheader("正在运行的任务")

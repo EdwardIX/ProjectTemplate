@@ -182,6 +182,11 @@ class SocketServer:
                 elif message['type'] == "CmdStopExperiment":
                     self.serv.stop_experiment(message['identifier'])
                     send_message(conn, pickle.dumps({"Success": True, "Message": "Command Sent"}))
+                elif message['type'] == 'CmdDelExperiment':
+                    self.serv.del_experiment(message['identifier'])
+                    send_message(conn, pickle.dumps({"Success": True, "Message": "Command Sent"}))
+                else:
+                    raise NotImplementedError(f"Not Recognized Message {message}")
             else:
                 connected = False
 
@@ -349,6 +354,17 @@ class SocketWeb(SocketClient):
     def cmd_stop_experiment(self, identifier): # Stop a specific Experiment
         success = self.send_message(pickle.dumps({
             "type": "CmdStopExperiment",
+            "identifier": identifier,
+        }))
+        if success:
+            ret = pickle.loads(self.recv_message())
+            return ret["Success"], ret["Message"]
+        else:
+            return False, "Failed To Send Command"
+    
+    def cmd_del_experiment(self, identifier): # Delete a specific Experiment
+        success = self.send_message(pickle.dumps({
+            "type": "CmdDelExperiment",
             "identifier": identifier,
         }))
         if success:

@@ -56,44 +56,46 @@ class Experiment:
         for config in self.config_list:
             self.tasks.append(Task(config['target'], config['args'], config['reqs']))
         
-        if os.path.exists(os.path.join("runs", self.exp_name, "tasks.json")):
-            if self.share_config == 'false':
-                self.save_task()
-                success, msg = self.calc_run_list()
-            elif self.share_config == 'check':
-                return False, "The same experiment name detected, please specify share_config"
-            elif self.share_config == 'true':
-                msg = self.load_task()
-                success, _msg = self.calc_run_list()
-                if _msg != "Success":
-                    msg = msg + '; ' + _msg
-        else:
-            self.save_task()
-            success, msg = self.calc_run_list()
-        
+        success, msg = self.handle_previous_runs()
         self.save_runinfo()
         
         return success, msg
 
-    def load_task(self):
-        with open(os.path.join("runs", self.exp_name, "tasks.json"), "r") as f:
-            task_config = json.load(f)["TaskArgs"]
-            if len(task_config) != len(self.tasks):
-                msg = "different number of Tasks detected, replace both task config and requirements"
-                task_reqs = json.load(f)["TaskReqs"]
-                self.tasks = [(c, r) for c, r in zip(task_config, task_reqs)]
-            else:
-                msg = "Load Task List from existing file. Current Task List replaced"
-                for i, t in enumerate(self.tasks):
-                    t.args = task_config[i]
-        return msg
+    def handle_previous_runs(self):
+        # Step 1: Calculate the directory of most recent experiment with the same name
+        prev_dir = max(
+            (d for d in os.listdir(os.path.join("runs", self.exp_name)) if re.match(r'\d{2}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}', d)),
+            key=lambda d: time.strptime(d, '%y.%m.%d-%H.%M.%S'),
+            default=None
+        )
+        prev_dir = os.path.join("runs", self.exp_name, prev_dir)
 
-    def save_task(self):
-        with open(os.path.join("runs", self.exp_name, "tasks.json"), "w") as f:
-            json.dump({
-                "TaskArgs": [t.args for t in self.tasks],
-                "TaskReqs": [t.reqs for t in self.tasks],
-            }, f, indent=2)
+        if prev_dir is not None:
+            # Step 2: load config / run_list from previous runs
+            if self.share_config == 'check':
+                return False, "The same experiment name detected, please specify share_config"
+            elif self.share_config == 'false': # Use Current Config
+                success, msg = self.calc_run_list(prev_dir)
+            elif self.share_config == 'true':
+                # Load config from previous run
+                with open(os.path.join(prev_dir, "runinfo.json"), "r") as f:
+                    prev_tasks = json.load(f)["Tasks"]
+                    if len(prev_tasks) != len(self.tasks):
+                        msg = "different number of Tasks detected, replace both task config and requirements"
+                        self.tasks = [Task(**t) for t in prev_tasks]
+                    else:
+                        msg = "Load Task List from existing file. Current Task List replaced"
+                        for i, t in enumerate(self.tasks):
+                            t.target = prev_tasks[i].target
+                            t.args = prev_tasks[i].args
+                # Calc Run List
+                success, _msg = self.calc_run_list(prev_dir)
+                if not success: 
+                    msg = _msg
+        else:
+            success, msg = self.calc_run_list()
+
+        return success, msg
     
     def save_runinfo(self):
         with open(os.path.join("runs", self.exp_name, self.run_time, "runinfo.json"), "w") as f:
@@ -103,28 +105,23 @@ class Experiment:
                 "Tasks": [{"target": t.target, "args": t.args, "reqs": t.reqs} for t in self.tasks],
             }, f, indent=2)
 
-    def calc_run_list(self):
+    def calc_run_list(self, prev_dir=None):
         if isinstance(self.run_list, str):
             if self.run_list == "All":
                 self.run_list = [(i, j) for i, t in enumerate(self.tasks) for j in range(t.reqs["repeat"])]
             elif self.run_list == "Failed": # Find all failed tasks in the previous run
-                prev_dir = max(
-                    (d for d in os.listdir("runs", self.exp_name) if re.match(r'\d{2}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}', d)),
-                    key=lambda d: time.strptime(d, '%y.%m.%d-%H.%M.%S'),
-                    default=None
-                )
-                if prev_dir is not None:
-                    with open(os.path.join("runs", self.exp_name, prev_dir, "runinfo.json"), "r") as f:
+                if prev_dir is not None: # Load RunList from previous run
+                    with open(os.path.join(prev_dir, "runinfo.json"), "r") as f:
                         self.run_list = json.load(f)["RunList"]
                     
                     def is_failed(i, j):
-                        path = os.path.join("runs", self.exp_name, prev_dir, f"{i}-{j}", f"summary.json")
+                        path = os.path.join(prev_dir, f"{i}-{j}", f"summary.json")
                         if not os.path.exists(path): return True
                         with open(path) as f: return not json.load(f)["success"]
                     
                     self.run_list = list(filter(self.run_list, is_failed))
                     if self.share_config == 'false':
-                        return True, "Load RunList from previous run, this might cause error when TaskConfig changed"
+                        return False, "Load RunList from previous run, this might cause error when TaskConfig changed"
                 else:
                     self.run_list = [(i, j) for i, t in enumerate(self.tasks) for j in range(t.reqs["repeat"])]
             else:

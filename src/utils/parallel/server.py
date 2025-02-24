@@ -14,7 +14,7 @@ class Server:
     """
     A task manage server enables multiple clients to run tasks in parallel.
     Components: 
-        self.exps / self.exps_active:  All the experiments (running)
+        self.exps:  All the experiments (running)
         self.runner_stats:  All the active runners
         self.tasks_gpuinfo:  All the active tasks and its gpuinfo
     """
@@ -22,8 +22,8 @@ class Server:
         self.socket = SocketServer(self)
 
         self.exps:Dict[str, Experiment] = {} # All Experiments
-        # self.exps_active:Dict[str, Experiment] = {} # All Active Experiments (TODO: Remove it)
-
+        self.exps_wlock = threading.Lock()
+        
         self.runner_stats:Dict[str, RunnerStatus] = {} # All Active Runners
         self.tasks_gpuinfo:Dict[str, Dict[str, List[int]]] = {} # All Active tasks and its gpuinfo
 
@@ -85,8 +85,8 @@ class Server:
     def add_experiment(self, e:Experiment): # UI: Add an experiment
         success, msg = e.prepare()
         if success:
-            self.exps[e.identifier] = e
-            # self.exps_active[e.identifier] = e
+            with self.exps_wlock:
+                self.exps[e.identifier] = e
         
         return success, msg
 
@@ -105,6 +105,12 @@ class Server:
                     exp.set_task_status(i, j, "Failed")
                 else: # Success / Failed / Skipped ...: just do nothing
                     pass
+
+    def del_experiment(self, identifier): # UI: Delete experiment
+        if identifier in self.exps.keys():
+            self.stop_experiment(identifier)
+            with self.exps_wlock:
+                self.exps.pop(identifier)
 
     def on_new_runner(self, name): # Handle a new runner, add runner status to it
         self.runner_stats[name] = RunnerStatus()

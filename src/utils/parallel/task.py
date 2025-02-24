@@ -29,18 +29,6 @@ def find_free_port():
     
     return port
 
-def get_func_by_path(path, func_name):
-    spec = importlib.util.spec_from_file_location("temp_module", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    func = getattr(module, func_name)
-    return func
-
-def get_func_by_module_name(module_name, func_name):
-    module = importlib.import_module(module_name)
-    func = getattr(module, func_name)
-    return func
-
 def parse_seed(seed, i, j):
     random.seed(int(time.time()) ^ os.getpid())
     if seed == "Random":
@@ -131,6 +119,7 @@ class Task:
 
         self.process = sp.Popen(['python', __file__,
                                  '--mode', 'python',
+                                 '--target', ','.join(self.target),
                                  '--args', base64.b64encode(pickle.dumps(self.args)),
                                  '--path', path,
                                  '--taskid', str(taskid),
@@ -167,6 +156,7 @@ class Task:
                                  f'--master_port={port}',
                                  __file__,
                                  '--mode', 'torchrun_multinode',
+                                 '--target', ','.join(self.target),
                                  '--args', base64.b64encode(pickle.dumps(self.args)),
                                  '--path', path,
                                  '--taskid', str(taskid),
@@ -188,6 +178,7 @@ class Task:
                                  f'--nproc-per-node={len(gpu_ids)}',
                                  __file__,
                                  '--mode', 'torchrun_singlenode',
+                                 '--target', ','.join(self.target),
                                  '--args', base64.b64encode(pickle.dumps(self.args)),
                                  '--path', path,
                                  '--taskid', str(taskid),
@@ -213,7 +204,7 @@ class Task:
                     'args': self.args,
                     'reqs': self.reqs
                 }, f, indent=4)
-                
+        
         # Run Task
         if nnodes > 1:
             self.run_torchrun_multinode(nnodes, node_rank, gpuids, path, taskid, repeatid, seed, localsrc)
@@ -229,7 +220,6 @@ class Task:
         if self.process:
             self.process.terminate()
         self.process=None
-        self.gpuids=None
 
     def join(self):
         if self.process:
@@ -237,10 +227,9 @@ class Task:
         else:
             retcode = None
         self.process=None
-        self.gpuids=None
         return retcode
 
-def subprocess(args, info):
+def subprocess(target, args, info):
     """This method will be the target of subprocess and started as a new process."""
     # 1: Set Gpu run environment:
     import torch
@@ -295,24 +284,37 @@ def subprocess(args, info):
         signal.signal(signal.SIGTERM, summary)
         signal.signal(signal.SIGINT, summary) # Ctrl-C
 
-    # 5: Try to load function, Setup stat
-    exception = None
-    try:
-        func = get_func_by_module_name(os.path.join(get_parent_dir(info['path'], 4), 'main.py'), 'target')
-    except Exception as e:
-        exception = e
-    if exception:
+    # 5: Try to load function
+    exceptions_in_loading_function = {}
+    def get_func_by_path(module_name, func_name):
+        if not module_name.endswith('.py'): module_name += '.py'
+        spec = importlib.util.spec_from_file_location("temp_module", os.path.join(get_parent_dir(info['path'], 4), module_name))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        func = getattr(module, func_name)
+        return func
+    def get_func_by_module_name(module_name, func_name):
+        module = importlib.import_module(module_name)
+        func = getattr(module, func_name)
+        return func
+    
+    for method in [get_func_by_module_name, get_func_by_path]:
         try:
-            func = get_func_by_path(os.path.join(get_parent_dir(info['path'], 4), 'main.py'), 'target')
-            exception = None
+            func = method(*target)
+            break # if success
         except Exception as e:
-            exception = e
+            exceptions_in_loading_function[method.__name__] = e
+    else: # All Methods Failed
+        exception = RuntimeError(f"Failed to load function to run: {exceptions_in_loading_function}")
+        summary(None, None)
 
+    # 6: Load args, Setup stat
     args = pickle.loads(args)
     start_time = {"Wall": time.time(), "User": time.process_time()}
     tracemalloc.start()
 
-    # 6: Run
+    # 7: Run
+    exception = None
     try:
         func(cfg=args, info=info)
     except Exception as e:
@@ -328,6 +330,7 @@ if __name__ == "__main__":
     # Accept args
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str)
+    parser.add_argument('--target', type=str)
     parser.add_argument('--args', type=str)
     parser.add_argument('--path', type=str)
     parser.add_argument('--taskid', type=int)
@@ -363,4 +366,4 @@ if __name__ == "__main__":
             'localsrc': args.localsrc == 'True',
         }
 
-    subprocess(base64.b64decode(args.args), info)
+    subprocess(args.target.split(','), base64.b64decode(args.args), info)
